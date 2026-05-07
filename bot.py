@@ -125,12 +125,12 @@ def parse_ai(raw):
         return json.loads(raw)
     except json.JSONDecodeError:
         # AI sometimes returns explanation text before/after JSON — extract it
-        m = re.search(r'\{[^{}]*"reply"[^{}]*"action".*?\}', raw, re.DOTALL)
-        if m:
-            try:
-                return json.loads(m.group())
-            except json.JSONDecodeError:
-                pass
+        for i, ch in enumerate(raw):
+            if ch == '{' and '"reply"' in raw[i:]:
+                try:
+                    return json.loads(raw[i:])
+                except json.JSONDecodeError:
+                    continue
         return {"reply": raw, "action": "none", "params": {}}
 
 
@@ -247,12 +247,25 @@ def do_search_user(params, chat_id):
 
 
 def _pull_chat_messages(chat_id, since):
-    """Pull all messages from a single chat since a given time."""
-    msgs_result = lark_cmd(["im", "+chat-messages-list", "--chat-id", chat_id,
-                            "--as", "bot", "--start", since, "--page-all"])
-    if not msgs_result or not msgs_result.get("ok"):
-        return []
-    return msgs_result.get("data", {}).get("messages", [])
+    """Pull all messages from a single chat since a given time, auto-paginating."""
+    all_messages = []
+    page_token = ""
+    for _ in range(10):  # max 10 pages = 500 messages
+        args = ["im", "+chat-messages-list", "--chat-id", chat_id,
+                "--as", "bot", "--start", since, "--page-size", "50"]
+        if page_token:
+            args += ["--page-token", page_token]
+        result = lark_cmd(args)
+        if not result or not result.get("ok"):
+            break
+        data = result.get("data", {})
+        all_messages.extend(data.get("messages", []))
+        if not data.get("has_more"):
+            break
+        page_token = data.get("page_token", "")
+        if not page_token:
+            break
+    return all_messages
 
 
 def _format_message(m, chat_name=""):
