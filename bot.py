@@ -36,7 +36,9 @@ REPLY_PROMPT = """你是 Jake R 的飞书 AI 助手，名叫"小J"。你在群�
 - meeting: 约会议 → params: summary, start(ISO8601+08:00), duration(如1h), attendees(open_id列表，发起人必须包含)
 - cancel_meeting: 取消会议 → params: keyword
 - search_user: 查找同事 → params: query
-- digest: 汇总近期消息（当用户说"汇总"、"有什么消息"、"最近有啥"等）→ 无需 params
+- digest: 消息汇总或定向分析 → params: query(用户原始问题，通用汇总时留空), days(时间范围天数，AI根据问题推断，默认7)
+  - 通用汇总（"汇总一下"、"有什么消息"）→ query留空，不需要days
+  - 定向分析（"帮我看看XX提了什么"、"分析一下XX内容"）→ query填用户原始问题，days根据上下文推断
 - none: 不需要操作
 
 原则：
@@ -79,6 +81,19 @@ DIGEST_PROMPT = """以下是最近群聊中与 Jake R 相关的消息。请帮�
 消息列表：
 __MESSAGES__"""
 
+ANALYSIS_PROMPT = """你是飞书群消息分析助手。根据用户的问题，从群聊消息中提取相关信息并回答。
+
+用户问题：__QUERY__
+
+以下是群里最近的消息记录：
+__MESSAGES__
+
+要求：
+- 只回答与用户问题相关的内容
+- 引用具体的人和消息内容
+- 简洁明了，纯文本
+- 如果消息中没有相关内容，如实说明"""
+
 
 # --- AI ---
 def call_ai(system_prompt, user_msg):
@@ -109,6 +124,13 @@ def parse_ai(raw):
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
+        # AI sometimes returns explanation text before/after JSON — extract it
+        m = re.search(r'\{[^{}]*"reply"[^{}]*"action".*?\}', raw, re.DOTALL)
+        if m:
+            try:
+                return json.loads(m.group())
+            except json.JSONDecodeError:
+                pass
         return {"reply": raw, "action": "none", "params": {}}
 
 
@@ -117,7 +139,7 @@ def lark_cmd(args):
     try:
         result = subprocess.run(
             ["lark-cli"] + args,
-            capture_output=True, text=True, timeout=30,
+            capture_output=True, text=True, timeout=60,
         )
         if result.returncode == 0 and result.stdout.strip():
             return json.loads(result.stdout)
@@ -224,12 +246,52 @@ def do_search_user(params, chat_id):
     return True
 
 
-def do_digest(chat_id):
-    """On-demand: pull recent messages from all bot chats, filter Jake-related, summarize."""
+def _pull_chat_messages(chat_id, since):
+    """Pull all messages from a single chat since a given time."""
+    msgs_result = lark_cmd(["im", "+chat-messages-list", "--chat-id", chat_id,
+                            "--as", "bot", "--start", since, "--page-all"])
+    if not msgs_result or not msgs_result.get("ok"):
+        return []
+    return msgs_result.get("data", {}).get("messages", [])
+
+
+def _format_message(m, chat_name=""):
+    """Format a single message into a readable line."""
+    sender_name = m.get("sender", {}).get("name", "未知")
+    content = m.get("content", "") or ""
+    ts = m.get("create_time", "")
+    prefix = f"[{chat_name}] " if chat_name else ""
+    return f"{prefix}{ts} {sender_name}: {content[:200]}"
+
+
+def do_digest(chat_id, query="", days=0):
+    """Message digest with two modes: targeted analysis (with query) or general summary."""
+
+    if query:
+        # --- Targeted analysis: current chat only, no Jake filter ---
+        if chat_id:
+            reply_in_chat(chat_id, "我去翻翻消息，帮你分析一下~")
+        if not days:
+            days = 7
+        since = (datetime.now() - timedelta(days=days)).isoformat()
+        messages = _pull_chat_messages(chat_id, since)
+        if not messages:
+            if chat_id: reply_in_chat(chat_id, f"最近 {days} 天没找到消息")
+            return True
+        msg_lines = [_format_message(m) for m in messages]
+        msg_text = "\n".join(msg_lines)
+        prompt = ANALYSIS_PROMPT.replace("__QUERY__", query).replace("__MESSAGES__", msg_text)
+        raw = call_ai(prompt, "请分析")
+        summary = raw or "分析失败，请稍后再试"
+        if chat_id:
+            reply_in_chat(chat_id, summary)
+        log(f"Analysis: {len(messages)} messages, query={query[:40]}")
+        return True
+
+    # --- General summary: all chats, Jake-related, last 2 days ---
     if chat_id:
         reply_in_chat(chat_id, "我去翻翻最近的消息~")
 
-    # Get all chats the bot is in
     chats_result = lark_cmd(["im", "chats", "list", "--as", "bot",
                              "--params", json.dumps({"page_size": 20})])
     if not chats_result:
@@ -241,7 +303,6 @@ def do_digest(chat_id):
         if chat_id: reply_in_chat(chat_id, "bot 还没加入任何群")
         return False
 
-    # Pull recent messages (last 2 days) from each chat
     since = (datetime.now() - timedelta(days=2)).isoformat()
     jake_messages = []
 
@@ -250,28 +311,16 @@ def do_digest(chat_id):
         cname = c.get("name", "未知群")
         if not cid:
             continue
-        msgs_result = lark_cmd(["im", "+chat-messages-list", "--chat-id", cid,
-                                "--start", since, "--page-size", "50"])
-        if not msgs_result or not msgs_result.get("ok"):
-            continue
-        messages = msgs_result.get("data", {}).get("messages", [])
+        messages = _pull_chat_messages(cid, since)
         for m in messages:
-            content = m.get("body", {}).get("content", "") or ""
-            # Check if mentions Jake
+            content = m.get("content", "") or ""
             if re.search(r"Jake\s*R|JakeR|@Jake", content, re.IGNORECASE):
-                sender = m.get("sender", {}).get("id", "?")
-                t = m.get("create_time", "")
-                try:
-                    ts = datetime.fromtimestamp(int(t) / 1000).strftime("%H:%M") if t else "?"
-                except (ValueError, OSError):
-                    ts = "?"
-                jake_messages.append(f"[{cname}] {ts} {sender}: {content[:100]}")
+                jake_messages.append(_format_message(m, cname))
 
     if not jake_messages:
         if chat_id: reply_in_chat(chat_id, "最近两天没有人提到你，清净~")
         return True
 
-    # Summarize with AI
     msg_text = "\n".join(jake_messages)
     raw = call_ai(DIGEST_PROMPT.replace("__MESSAGES__", msg_text), "请汇总")
     summary = raw or "\n".join(jake_messages)
@@ -290,7 +339,7 @@ def execute_action(action, params, chat_id, sender_id=""):
     elif action == "search_user":
         return do_search_user(params, chat_id)
     elif action == "digest":
-        return do_digest(chat_id)
+        return do_digest(chat_id, params.get("query", ""), params.get("days", 0))
     return False
 
 
@@ -365,7 +414,8 @@ def process_event(event):
             "📅 约会议 — @我 说\"帮我约个会\"\n"
             "❌ 取消会议 — @我 说\"取消那个会议\"\n"
             "🔍 查人 — @我 说\"查一下 xxx\"\n"
-            "📋 消息汇总 — @我 说\"汇总一下\"（汇总近 2 天与 Jake 相关的消息）\n"
+            "📋 消息汇总 — @我 说\"汇总一下\"\n"
+            "🔎 定向分析 — @我 说\"帮我看看 XX 提了什么需求\"、\"分析一下 trigger 的内容\"\n"
             "💬 闲聊 — @我 随便说点什么\n\n"
             "📊 每天 20:00 自动私信 Jake 工作日报"
         )
@@ -393,7 +443,7 @@ def send_daily_report():
     log("Generating daily report...")
     cal = get_today_calendar()
 
-    # Pull jake-related messages from all chats
+    # Pull jake-related messages from all chats (today only)
     since = datetime.now().replace(hour=0, minute=0, second=0).isoformat()
     chats_result = lark_cmd(["im", "chats", "list", "--as", "bot",
                              "--params", json.dumps({"page_size": 20})])
@@ -403,13 +453,12 @@ def send_daily_report():
             cid = c.get("chat_id", "")
             cname = c.get("name", "")
             if not cid: continue
-            msgs = lark_cmd(["im", "+chat-messages-list", "--chat-id", cid,
-                             "--start", since, "--page-size", "50"])
-            if not msgs or not msgs.get("ok"): continue
-            for m in msgs.get("data", {}).get("messages", []):
-                content = m.get("body", {}).get("content", "") or ""
+            messages = _pull_chat_messages(cid, since)
+            for m in messages:
+                content = m.get("content", "") or ""
                 if re.search(r"Jake\s*R|JakeR|@Jake", content, re.IGNORECASE):
-                    msg_lines.append(f"[{cname}] {content[:80]}")
+                    sender_name = m.get("sender", {}).get("name", "未知")
+                    msg_lines.append(f"[{cname}] {sender_name}: {content[:80]}")
 
     msg_summary = "\n".join(msg_lines) if msg_lines else "今天群里没人提到你"
     raw = call_ai(REPORT_PROMPT.replace("__CALENDAR__", cal).replace("__MESSAGES__", msg_summary),
