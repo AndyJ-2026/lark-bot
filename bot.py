@@ -111,6 +111,7 @@ def call_ai(system_prompt, user_msg):
         )
         content = resp.choices[0].message.content.strip()
         content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
+        content = re.sub(r"<tool_code>.*?</tool_code>", "", content, flags=re.DOTALL).strip()
         if content.startswith("```"):
             content = content.split("\n", 1)[1].rsplit("```", 1)[0].strip()
         return content
