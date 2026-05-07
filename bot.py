@@ -358,6 +358,21 @@ def process_event(event):
     if not text.strip():
         return
 
+    # --- Help command: respond with feature list, skip AI ---
+    if text.strip().lower() in ("help", "帮助"):
+        help_text = (
+            "小J 能做这些事：\n\n"
+            "📅 约会议 — @我 说\"帮我约个会\"\n"
+            "❌ 取消会议 — @我 说\"取消那个会议\"\n"
+            "🔍 查人 — @我 说\"查一下 xxx\"\n"
+            "📋 消息汇总 — @我 说\"汇总一下\"（汇总近 2 天与 Jake 相关的消息）\n"
+            "💬 闲聊 — @我 随便说点什么\n\n"
+            "📊 每天 20:00 自动私信 Jake 工作日报"
+        )
+        if chat_id:
+            reply_in_chat(chat_id, help_text)
+        return
+
     log(f"@bot from {sender_id}: {text[:80]}")
 
     result = parse_ai(call_ai(REPLY_PROMPT, f"发送人: {sender_id}\n消息: {text}"))
