@@ -1,9 +1,9 @@
 """
-Lark Bot v7 — lean version:
+Lark Bot v8 — configurable, onboarding-ready:
+- First-time setup via chat (no code editing needed)
 - @bot in group → AI reply + execute actions
-- @bot "汇总一下" → pull recent messages from API on demand, filter & summarize
 - 1v1 with bot → direct conversation
-- 1v1 "帮我转写" → 录音 + Qwen3-ASR 转写 + AI 纪要 + 飞书文档
+- 1v1 "帮我转写" → 录音 + ASR 转写 + AI 纪要 + 飞书文档
 - 20:00 → daily work report
 - NO background queue, NO token waste
 """
@@ -17,25 +17,84 @@ import sys
 import threading
 import time
 from datetime import datetime, timedelta
-from openai import OpenAI
 
-# --- Config ---
-MINIMAX_API_KEY = os.environ.get("MINIMAX_API_KEY", "")
-JAKE_OPEN_ID = os.environ.get("JAKE_OPEN_ID", "ou_19af5476f7712283c2bc5f6554d4818b")
-EVENT_DIR = os.environ.get("EVENT_DIR", "/Users/jaker/lark-bot/events")
+BOT_DIR = os.path.dirname(os.path.abspath(__file__))
+CONFIG_FILE = os.path.join(BOT_DIR, "config.json")
+ONBOARDED_FILE = os.path.join(BOT_DIR, "onboarded_users.json")
+REMINDERS_FILE = os.path.join(BOT_DIR, "reminders.json")
+EVENT_DIR = os.environ.get("EVENT_DIR", os.path.join(BOT_DIR, "events"))
 AUDIO_CAPTURE_BIN = os.environ.get("AUDIO_CAPTURE_BIN", os.path.expanduser("~/meeting-cli/audio_capture"))
-TRANSCRIBE_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "transcribe_qwen.py")
-VENV_PYTHON = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".venv", "bin", "python")
+TRANSCRIBE_SCRIPT = os.path.join(BOT_DIR, "transcribe_qwen.py")
+VENV_PYTHON = os.path.join(BOT_DIR, ".venv", "bin", "python")
 VAULT_DIR = os.environ.get("MEETING_VAULT", os.path.expanduser("~/Documents/Obsidian Vault"))
 NOTES_FOLDER = os.environ.get("MEETING_NOTES_FOLDER", "会议纪要")
 TMPDIR_MEETING = os.path.join(os.environ.get("TMPDIR", "/tmp"), "meeting-cli")
 
-minimax = OpenAI(
-    api_key=MINIMAX_API_KEY,
-    base_url=os.environ.get("LLM_BASE_URL", "https://api.minimaxi.com/v1"),
-)
 
-REPLY_PROMPT = """你是 Jake R 的飞书 AI 助手，名叫"小J"。你在群里代替 Jake 跟同事互动。
+# ============================================================
+# Config
+# ============================================================
+
+def load_config():
+    if os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE) as f:
+                return json.load(f)
+        except (json.JSONDecodeError, IOError):
+            pass
+    return None
+
+
+def save_config(cfg):
+    with open(CONFIG_FILE, "w") as f:
+        json.dump(cfg, f, indent=2, ensure_ascii=False)
+
+
+CONFIG = load_config()
+
+# Derived from config (updated after setup completes)
+BOT_NAME = CONFIG["bot_name"] if CONFIG and CONFIG.get("bot_name") else "助手"
+OWNER_NAME = CONFIG["owner_name"] if CONFIG and CONFIG.get("owner_name") else ""
+OWNER_OPEN_ID = CONFIG["owner_open_id"] if CONFIG and CONFIG.get("owner_open_id") else ""
+LLM_MODEL = CONFIG["llm_model"] if CONFIG and CONFIG.get("llm_model") else "MiniMax-M2.5"
+
+# LLM client — initialized lazily after config is ready
+_llm_client = None
+
+
+def _get_llm_client():
+    global _llm_client
+    if _llm_client:
+        return _llm_client
+    if not CONFIG:
+        return None
+    from openai import OpenAI
+    api_key = CONFIG.get("llm_api_key") or os.environ.get("MINIMAX_API_KEY", "")
+    base_url = CONFIG.get("llm_base_url", "https://api.minimaxi.com/v1")
+    if not api_key:
+        return None
+    _llm_client = OpenAI(api_key=api_key, base_url=base_url)
+    return _llm_client
+
+
+def _reload_config():
+    """Reload config and update globals after setup."""
+    global CONFIG, BOT_NAME, OWNER_NAME, OWNER_OPEN_ID, LLM_MODEL, _llm_client
+    CONFIG = load_config()
+    if CONFIG:
+        BOT_NAME = CONFIG.get("bot_name", "助手")
+        OWNER_NAME = CONFIG.get("owner_name", "")
+        OWNER_OPEN_ID = CONFIG.get("owner_open_id", "")
+        LLM_MODEL = CONFIG.get("llm_model", "MiniMax-M2.5")
+        _llm_client = None  # force re-init
+
+
+# ============================================================
+# Prompts (template functions, use current config values)
+# ============================================================
+
+def _reply_prompt():
+    return f"""你是 {OWNER_NAME} 的飞书 AI 助手，名叫"{BOT_NAME}"。你在群里代替 {OWNER_NAME} 跟同事互动。
 
 性格：热情、靠谱、略带幽默感，像朋友之间聊天一样说话。
 
@@ -49,14 +108,14 @@ REPLY_PROMPT = """你是 Jake R 的飞书 AI 助手，名叫"小J"。你在群�
 - remind: 设置提醒 → params: time(ISO8601+08:00), message(提醒内容)
   - "明天中午提醒我写周报" → time: 明天12:00的ISO8601, message: "写周报"
   - "下午3点提醒我开会" → time: 今天15:00的ISO8601, message: "开会"
-- transcribe_start: 开始会议转写/录音 → params: {}
+- transcribe_start: 开始会议转写/录音 → params: {{}}
   - "帮我转写"、"开始录音"、"转写会议" → transcribe_start
-- transcribe_stop: 停止转写/录音并生成纪要 → params: {}
+- transcribe_stop: 停止转写/录音并生成纪要 → params: {{}}
   - "结束转写"、"停止录音"、"结束" → transcribe_stop
 - none: 不需要操作
 
 原则：
-- 能办的直接办，不推给 Jake
+- 能办的直接办，不推给 {OWNER_NAME}
 - 约会议：推断主题，时间转 ISO8601，发起人 open_id 放 attendees
 - "晚上10点"→ 当天22:00:00+08:00
 - 不用 markdown，纯文本
@@ -65,9 +124,11 @@ REPLY_PROMPT = """你是 Jake R 的飞书 AI 助手，名叫"小J"。你在群�
 当前时间：__NOW__
 
 JSON 输出（只输出 JSON）：
-{"reply": "纯文本回复", "action": "meeting/cancel_meeting/search_user/digest/remind/transcribe_start/transcribe_stop/none", "params": {}}"""
+{{"reply": "纯文本回复", "action": "meeting/cancel_meeting/search_user/digest/remind/transcribe_start/transcribe_stop/none", "params": {{}}}}"""
 
-CHAT_PROMPT = """你是 Jake R 的私人 AI 助手"小J"。1v1 聊天模式。
+
+def _chat_prompt():
+    return f"""你是 {OWNER_NAME} 的私人 AI 助手"{BOT_NAME}"。1v1 聊天模式。
 - 聪明靠谱，语气轻松
 - 可以查日历、安排事项、查人、设提醒、会议转写、回答问题
 - 不用 markdown，纯文本
@@ -77,25 +138,30 @@ CHAT_PROMPT = """你是 Jake R 的私人 AI 助手"小J"。1v1 聊天模式。
 当前时间：__NOW__
 
 JSON 输出：
-{"reply": "纯文本回复", "action": "meeting/cancel_meeting/search_user/digest/remind/transcribe_start/transcribe_stop/none", "params": {}}"""
+{{"reply": "纯文本回复", "action": "meeting/cancel_meeting/search_user/digest/remind/transcribe_start/transcribe_stop/none", "params": {{}}}}"""
 
-REPORT_PROMPT = """根据以下信息生成简洁的每日工作日报。
+
+def _report_prompt():
+    return f"""根据以下信息生成简洁的每日工作日报。
 
 今日日程：
 __CALENDAR__
 
-今日群消息摘要（与 Jake 相关的）：
+今日群消息摘要（与 {OWNER_NAME} 相关的）：
 __MESSAGES__
 
 要求：中文口语化，分"今天干了啥"和"还得跟进"两块，每条一句话，结尾来一句轻松的话。"""
 
-DIGEST_PROMPT = """以下是最近群聊中与 Jake R 相关的消息。请帮忙汇总：
-- 谁找了 Jake、什么事
-- 有哪些需要 Jake 跟进的
+
+def _digest_prompt():
+    return f"""以下是最近群聊中与 {OWNER_NAME} 相关的消息。请帮忙汇总：
+- 谁找了 {OWNER_NAME}、什么事
+- 有哪些需要 {OWNER_NAME} 跟进的
 - 简洁明了，纯文本
 
 消息列表：
 __MESSAGES__"""
+
 
 MINUTES_PROMPT = """你是一个专业的会议纪要助手。根据以下会议转写内容，生成一份结构化的会议纪要（Markdown 格式）。
 
@@ -142,13 +208,31 @@ __MESSAGES__
 - 如果消息中没有相关内容，如实说明"""
 
 
-# --- AI ---
+def _owner_pattern():
+    """动态生成 owner 名字匹配正则"""
+    if not OWNER_NAME:
+        return None
+    parts = [re.escape(OWNER_NAME), re.escape(f"@{OWNER_NAME}")]
+    # Handle names with spaces (e.g. "Jake R" → also match "JakeR")
+    if " " in OWNER_NAME:
+        parts.append(re.escape(OWNER_NAME.replace(" ", "")))
+    return re.compile("|".join(parts), re.IGNORECASE)
+
+
+# ============================================================
+# AI
+# ============================================================
+
 def call_ai(system_prompt, user_msg):
+    client = _get_llm_client()
+    if not client:
+        log("AI error: no LLM client configured")
+        return None
     now = datetime.now().strftime("%Y-%m-%d %H:%M %A")
     prompt = system_prompt.replace("__NOW__", now)
     try:
-        resp = minimax.chat.completions.create(
-            model="MiniMax-M2.5",
+        resp = client.chat.completions.create(
+            model=LLM_MODEL,
             messages=[
                 {"role": "system", "content": prompt},
                 {"role": "user", "content": user_msg},
@@ -172,7 +256,6 @@ def parse_ai(raw):
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
-        # AI sometimes returns explanation text before/after JSON — extract it
         for i, ch in enumerate(raw):
             if ch == '{' and '"reply"' in raw[i:]:
                 try:
@@ -182,7 +265,10 @@ def parse_ai(raw):
         return {"reply": raw, "action": "none", "params": {}}
 
 
-# --- Lark CLI ---
+# ============================================================
+# Lark CLI
+# ============================================================
+
 def lark_cmd(args):
     try:
         result = subprocess.run(
@@ -205,11 +291,199 @@ def reply_in_chat(chat_id, text):
 
 
 def send_dm(text):
-    result = lark_cmd(["im", "+messages-send", "--as", "bot", "--user-id", JAKE_OPEN_ID, "--text", text])
+    if not OWNER_OPEN_ID:
+        log("DM skipped: no owner configured")
+        return
+    result = lark_cmd(["im", "+messages-send", "--as", "bot", "--user-id", OWNER_OPEN_ID, "--text", text])
     log("DM sent" if result and result.get("ok") else "DM failed")
 
 
-# --- Actions ---
+def send_dm_markdown(text):
+    if not OWNER_OPEN_ID:
+        return
+    result = lark_cmd([
+        "im", "+messages-send", "--as", "bot",
+        "--user-id", OWNER_OPEN_ID,
+        "--markdown", text,
+    ])
+    log("DM (markdown) sent" if result and result.get("ok") else "DM (markdown) failed")
+
+
+# ============================================================
+# Setup mode (no config.json → interactive setup via chat)
+# ============================================================
+
+_setup_state = {
+    "step": "init",  # init → wait_bot_name → wait_api_key → done
+    "owner_open_id": "",
+    "owner_name": "",
+    "bot_name": "",
+    "chat_id": "",
+}
+
+
+def _get_user_name(open_id):
+    """通过 lark-cli 获取用户姓名"""
+    result = lark_cmd(["contact", "+search-user", "--query", open_id])
+    if result and result.get("ok"):
+        users = result.get("data", {}).get("users", [])
+        if users:
+            return users[0].get("name", "")
+    return ""
+
+
+def process_setup(event):
+    """配置模式：硬编码对话流程，不需要 LLM"""
+    sender_id = event.get("sender_id", "")
+    raw_content = event.get("content") or ""
+    chat_id = event.get("chat_id") or ""
+    chat_type = event.get("chat_type") or "group"
+
+    # 配置模式只处理私聊
+    if chat_type != "p2p":
+        return
+
+    text = raw_content.strip()
+
+    if _setup_state["step"] == "init":
+        # 第一个私聊的人成为 owner
+        _setup_state["owner_open_id"] = sender_id
+        _setup_state["chat_id"] = chat_id
+
+        # 尝试获取用户姓名
+        name = _get_user_name(sender_id)
+        _setup_state["owner_name"] = name
+
+        greeting = f"你好{' ' + name if name else ''}！" if name else "你好！"
+        reply_in_chat(chat_id, f"{greeting}我是你的新助手，还没有名字呢。\n你想叫我什么？")
+        _setup_state["step"] = "wait_bot_name"
+        return
+
+    if _setup_state["step"] == "wait_bot_name":
+        if not text:
+            reply_in_chat(chat_id, "名字不能为空，再说一次？")
+            return
+        _setup_state["bot_name"] = text
+        reply_in_chat(chat_id,
+            f"好的，我叫「{text}」！\n\n"
+            "接下来需要配置大模型 API Key，这样我才能理解你说的话。\n"
+            "推荐使用 MiniMax（https://www.minimax.chat）\n\n"
+            "请发送你的 API Key：")
+        _setup_state["step"] = "wait_api_key"
+        return
+
+    if _setup_state["step"] == "wait_api_key":
+        if not text or len(text) < 10:
+            reply_in_chat(chat_id, "这个不像是有效的 API Key，再检查一下？")
+            return
+
+        # 保存配置
+        cfg = {
+            "bot_name": _setup_state["bot_name"],
+            "owner_name": _setup_state["owner_name"],
+            "owner_open_id": _setup_state["owner_open_id"],
+            "llm_api_key": text,
+            "llm_base_url": "https://api.minimaxi.com/v1",
+            "llm_model": "MiniMax-M2.5",
+        }
+        save_config(cfg)
+        _reload_config()
+        _setup_state["step"] = "done"
+
+        reply_in_chat(chat_id,
+            f"配置完成！我叫{BOT_NAME}，{OWNER_NAME}你好~")
+
+        # 标记 owner 已引导 + 发送快速开始卡片
+        mark_onboarded(sender_id)
+        send_welcome_card(chat_id)
+        log(f"Setup complete: bot_name={BOT_NAME}, owner={OWNER_NAME}")
+        return
+
+
+# ============================================================
+# Onboarding (welcome card + new user detection)
+# ============================================================
+
+def load_onboarded():
+    if os.path.exists(ONBOARDED_FILE):
+        try:
+            with open(ONBOARDED_FILE) as f:
+                return json.load(f)
+        except (json.JSONDecodeError, IOError):
+            pass
+    return {"users": []}
+
+
+def save_onboarded(data):
+    with open(ONBOARDED_FILE, "w") as f:
+        json.dump(data, f, indent=2)
+
+
+def is_onboarded(user_id):
+    data = load_onboarded()
+    return user_id in data.get("users", [])
+
+
+def mark_onboarded(user_id):
+    data = load_onboarded()
+    if user_id not in data["users"]:
+        data["users"].append(user_id)
+        save_onboarded(data)
+
+
+def _get_bot_chats():
+    """获取 Bot 已加入的群列表"""
+    result = lark_cmd(["im", "chats", "list", "--as", "bot",
+                       "--params", json.dumps({"page_size": 20})])
+    if not result:
+        return []
+    items = result.get("data", {}).get("items", [])
+    return [c.get("name", "未知群") for c in items if c.get("name")]
+
+
+def _build_welcome_card(chat_id=None):
+    """构建快速开始卡片"""
+    chats = _get_bot_chats()
+    chat_list = "\n".join(f"• {name}" for name in chats) if chats else "（还没有加入任何群）"
+
+    content = (
+        f"👋 你好！我是**{BOT_NAME}**，{OWNER_NAME} 的飞书 AI 助手\n\n"
+        "以下是我能做的事：\n\n"
+        "✅ 闲聊对话 — 直接跟我说话就行\n"
+        "✅ 约会议 — \"帮我约个会\"\n"
+        "✅ 取消会议 — \"取消那个会议\"\n"
+        "✅ 查同事 — \"查一下 xxx\"\n"
+        "✅ 设提醒 — \"明天中午提醒我写周报\"\n"
+        "⚠️ 消息汇总 — \"汇总一下\"（需把我拉进群）\n"
+        "⚠️ 定向分析 — \"帮我看看 XX 提了什么\"（需把我拉进群）\n"
+        "🎙️ 会议转写 — \"帮我转写\"（需本机运行 Bot）\n\n"
+        f"**我已加入的群：**\n{chat_list}\n"
+        "（没有你需要的群？把我拉进去就行）\n\n"
+        f"💡 随时跟我说「帮助」可以再看这张表"
+    )
+
+    return json.dumps({"elements": [{"tag": "markdown", "content": content}]})
+
+
+def send_welcome_card(chat_id):
+    """发送快速开始卡片"""
+    card = _build_welcome_card(chat_id)
+    result = lark_cmd([
+        "im", "+messages-send", "--as", "bot",
+        "--chat-id", chat_id,
+        "--msg-type", "interactive",
+        "--content", card,
+    ])
+    log("Welcome card sent" if result and result.get("ok") else "Welcome card failed")
+
+
+HELP_TRIGGERS = {"help", "帮助", "你能做什么", "你会什么"}
+
+
+# ============================================================
+# Actions
+# ============================================================
+
 def do_meeting(params, chat_id, sender_id=""):
     start = params.get("start", "")
     summary = params.get("summary", "会议")
@@ -231,8 +505,8 @@ def do_meeting(params, chat_id, sender_id=""):
     attendees = list(params.get("attendees", []))
     if sender_id and sender_id not in attendees:
         attendees.append(sender_id)
-    if JAKE_OPEN_ID not in attendees:
-        attendees.append(JAKE_OPEN_ID)
+    if OWNER_OPEN_ID and OWNER_OPEN_ID not in attendees:
+        attendees.append(OWNER_OPEN_ID)
     if attendees:
         args += ["--attendee-ids", ",".join(attendees)]
     result = lark_cmd(args)
@@ -295,10 +569,9 @@ def do_search_user(params, chat_id):
 
 
 def _pull_chat_messages(chat_id, since):
-    """Pull all messages from a single chat since a given time, auto-paginating."""
     all_messages = []
     page_token = ""
-    for _ in range(10):  # max 10 pages = 500 messages
+    for _ in range(10):
         args = ["im", "+chat-messages-list", "--chat-id", chat_id,
                 "--as", "bot", "--start", since, "--page-size", "50"]
         if page_token:
@@ -317,7 +590,6 @@ def _pull_chat_messages(chat_id, since):
 
 
 def _format_message(m, chat_name=""):
-    """Format a single message into a readable line."""
     sender_name = m.get("sender", {}).get("name", "未知")
     content = m.get("content", "") or ""
     ts = m.get("create_time", "")
@@ -326,10 +598,7 @@ def _format_message(m, chat_name=""):
 
 
 def do_digest(chat_id, query="", days=0, chat_type="group"):
-    """Message digest with two modes: targeted analysis (with query) or general summary."""
-
     if query:
-        # --- Targeted analysis ---
         if chat_id:
             reply_in_chat(chat_id, "我去翻翻消息，帮你分析一下~")
         if not days:
@@ -337,7 +606,6 @@ def do_digest(chat_id, query="", days=0, chat_type="group"):
         since = (datetime.now() - timedelta(days=days)).isoformat()
 
         if chat_type == "p2p":
-            # Triggered from private chat — scan all group chats
             chats_result = lark_cmd(["im", "chats", "list", "--as", "bot",
                                      "--params", json.dumps({"page_size": 20})])
             messages = []
@@ -367,7 +635,7 @@ def do_digest(chat_id, query="", days=0, chat_type="group"):
         log(f"Analysis: {len(messages)} messages, query={query[:40]}")
         return True
 
-    # --- General summary: all chats, Jake-related, last 2 days ---
+    # General summary: owner-related messages
     if chat_id:
         reply_in_chat(chat_id, "我去翻翻最近的消息~")
 
@@ -383,7 +651,8 @@ def do_digest(chat_id, query="", days=0, chat_type="group"):
         return False
 
     since = (datetime.now() - timedelta(days=2)).isoformat()
-    jake_messages = []
+    owner_messages = []
+    pattern = _owner_pattern()
 
     for c in chat_list:
         cid = c.get("chat_id", "")
@@ -393,25 +662,24 @@ def do_digest(chat_id, query="", days=0, chat_type="group"):
         messages = _pull_chat_messages(cid, since)
         for m in messages:
             content = m.get("content", "") or ""
-            if re.search(r"Jake\s*R|JakeR|@Jake", content, re.IGNORECASE):
-                jake_messages.append(_format_message(m, cname))
+            if pattern and pattern.search(content):
+                owner_messages.append(_format_message(m, cname))
 
-    if not jake_messages:
+    if not owner_messages:
         if chat_id: reply_in_chat(chat_id, "最近两天没有人提到你，清净~")
         return True
 
-    msg_text = "\n".join(jake_messages)
-    raw = call_ai(DIGEST_PROMPT.replace("__MESSAGES__", msg_text), "请汇总")
-    summary = raw or "\n".join(jake_messages)
+    msg_text = "\n".join(owner_messages)
+    raw = call_ai(_digest_prompt().replace("__MESSAGES__", msg_text), "请汇总")
+    summary = raw or "\n".join(owner_messages)
 
     if chat_id:
         reply_in_chat(chat_id, summary)
-    log(f"Digest: {len(jake_messages)} jake-related messages")
+    log(f"Digest: {len(owner_messages)} owner-related messages")
     return True
 
 
-REMINDERS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "reminders.json")
-
+# --- Reminders ---
 
 def load_reminders():
     if os.path.exists(REMINDERS_FILE):
@@ -484,7 +752,10 @@ def check_reminders():
         save_reminders(remaining)
 
 
-# --- Transcribe ---
+# ============================================================
+# Transcribe
+# ============================================================
+
 _transcribe_state = {
     "active": False,
     "process": None,
@@ -497,8 +768,7 @@ _transcribe_state = {
 ASR_ENGINE = "本地（SenseVoice）"
 
 
-def _build_card(status, **kwargs):
-    """构建不同状态的卡片 JSON"""
+def _build_transcribe_card(status, **kwargs):
     if status == "recording":
         start_time = kwargs.get("start_time", "")
         content = f"🎙️ **正在录音中...**\n开始时间：{start_time}\n引擎：{ASR_ENGINE}\n\n💡 说「结束转写」即可停止并生成纪要"
@@ -517,14 +787,11 @@ def _build_card(status, **kwargs):
         content = f"❌ **转写失败**\n{error_msg}"
     else:
         content = status
-
-    card = json.dumps({"elements": [{"tag": "markdown", "content": content}]})
-    return card
+    return json.dumps({"elements": [{"tag": "markdown", "content": content}]})
 
 
-def _send_card(chat_id, status, **kwargs):
-    """发送卡片消息，返回 message_id"""
-    card = _build_card(status, **kwargs)
+def _send_transcribe_card(chat_id, status, **kwargs):
+    card = _build_transcribe_card(status, **kwargs)
     result = lark_cmd([
         "im", "+messages-send", "--as", "bot",
         "--chat-id", chat_id,
@@ -533,24 +800,23 @@ def _send_card(chat_id, status, **kwargs):
     ])
     if result and result.get("ok"):
         msg_id = result.get("data", {}).get("message_id", "")
-        log(f"Card sent: {msg_id}")
+        log(f"Transcribe card sent: {msg_id}")
         return msg_id
-    log("Card send failed")
+    log("Transcribe card send failed")
     return ""
 
 
-def _update_card(msg_id, status, **kwargs):
-    """更新已发送的卡片"""
+def _update_transcribe_card(msg_id, status, **kwargs):
     if not msg_id:
         return
-    card = _build_card(status, **kwargs)
+    card = _build_transcribe_card(status, **kwargs)
     result = lark_cmd([
         "api", "PATCH", f"/open-apis/im/v1/messages/{msg_id}",
         "--as", "bot",
         "--data", json.dumps({"msg_type": "interactive", "content": card}),
     ])
     ok = result and result.get("code") == 0
-    log(f"Card update {'ok' if ok else 'failed'}: {msg_id}")
+    log(f"Transcribe card update {'ok' if ok else 'failed'}: {msg_id}")
 
 
 def do_transcribe_start(chat_id):
@@ -586,13 +852,11 @@ def do_transcribe_start(chat_id):
     _transcribe_state["start_time"] = time.time()
     _transcribe_state["chat_id"] = chat_id
 
-    # 发送录音状态卡片
     card_msg_id = ""
     if chat_id:
-        card_msg_id = _send_card(chat_id, "recording",
-                                 start_time=time.strftime("%H:%M"))
+        card_msg_id = _send_transcribe_card(chat_id, "recording",
+                                             start_time=time.strftime("%H:%M"))
     _transcribe_state["card_msg_id"] = card_msg_id
-
     log(f"Transcribe started: {audio_file}")
     return True
 
@@ -609,7 +873,6 @@ def do_transcribe_stop(chat_id):
     card_msg_id = _transcribe_state["card_msg_id"]
     duration_sec = time.time() - start_time if start_time else 0
 
-    # 停止录音
     if proc:
         proc.terminate()
         try:
@@ -621,11 +884,8 @@ def do_transcribe_stop(chat_id):
     _transcribe_state["process"] = None
 
     duration_str = f"{int(duration_sec // 60)} 分钟"
+    _update_transcribe_card(card_msg_id, "transcribing", duration=duration_str)
 
-    # 更新卡片为转写中状态
-    _update_card(card_msg_id, "transcribing", duration=duration_str)
-
-    # 后台线程处理转写流水线
     t = threading.Thread(
         target=_transcribe_pipeline,
         args=(audio_file, duration_sec, chat_id, card_msg_id),
@@ -637,10 +897,8 @@ def do_transcribe_stop(chat_id):
 
 
 def _transcribe_pipeline(audio_file, duration_sec, chat_id, card_msg_id):
-    """后台转写流水线：转写 → 纪要 → Obsidian → 飞书文档 → 更新卡片"""
     duration_str = f"{int(duration_sec // 60)} 分钟"
     try:
-        # 1. 转写
         transcript_file = audio_file.replace(".pcm", ".txt")
         log(f"Running SenseVoice on {audio_file}...")
         transcribe_python = VENV_PYTHON if os.path.isfile(VENV_PYTHON) else sys.executable
@@ -650,30 +908,28 @@ def _transcribe_pipeline(audio_file, duration_sec, chat_id, card_msg_id):
         )
         if result.returncode != 0:
             log(f"Transcribe failed: {result.stderr[:300]}")
-            _update_card(card_msg_id, "error", error="转写失败，可能是音频太短或模型出错")
+            _update_transcribe_card(card_msg_id, "error", error="转写失败，可能是音频太短或模型出错")
             return
 
         if not os.path.isfile(transcript_file):
-            _update_card(card_msg_id, "error", error="转写结果为空，可能会议中没有语音")
+            _update_transcribe_card(card_msg_id, "error", error="转写结果为空，可能会议中没有语音")
             return
 
         with open(transcript_file, encoding="utf-8") as f:
             transcript = f.read()
 
         if not transcript.strip():
-            _update_card(card_msg_id, "error", error="转写结果为空")
+            _update_transcribe_card(card_msg_id, "error", error="转写结果为空")
             return
 
         log(f"Transcription done: {len(transcript)} chars")
 
-        # 2. AI 生成纪要
         date_str = time.strftime("%Y-%m-%d")
         prompt = MINUTES_PROMPT.replace("__DATE__", date_str).replace("__DURATION__", duration_str)
         minutes_md = call_ai(prompt, transcript)
         if not minutes_md:
             minutes_md = f"# 会议转写 {date_str}\n\n{transcript}"
 
-        # 3. 保存到 Obsidian
         notes_dir = os.path.join(VAULT_DIR, NOTES_FOLDER)
         os.makedirs(notes_dir, exist_ok=True)
         ts = time.strftime("%Y%m%d_%H%M%S")
@@ -682,7 +938,6 @@ def _transcribe_pipeline(audio_file, duration_sec, chat_id, card_msg_id):
             f.write(minutes_md)
         log(f"Minutes saved to Obsidian: {note_file}")
 
-        # 4. 创建飞书云文档
         doc_title = f"{date_str} 会议纪要"
         doc_result = lark_cmd([
             "docs", "+create",
@@ -696,7 +951,6 @@ def _transcribe_pipeline(audio_file, duration_sec, chat_id, card_msg_id):
         else:
             log("Lark doc creation failed")
 
-        # 5. 生成会议概括
         summary_text = call_ai(
             MINUTES_SUMMARY_PROMPT.replace("__MINUTES__", minutes_md),
             "请概括",
@@ -704,14 +958,12 @@ def _transcribe_pipeline(audio_file, duration_sec, chat_id, card_msg_id):
         if not summary_text:
             summary_text = "会议纪要已生成"
 
-        # 6. 更新卡片为完成状态
-        _update_card(card_msg_id, "done",
-                     duration=duration_str,
-                     summary=summary_text,
-                     doc_url=doc_url)
-        log("Card updated to done")
+        _update_transcribe_card(card_msg_id, "done",
+                                duration=duration_str,
+                                summary=summary_text,
+                                doc_url=doc_url)
+        log("Transcribe card updated to done")
 
-        # 7. 清理临时文件
         for f in [audio_file, transcript_file]:
             try:
                 os.remove(f)
@@ -721,18 +973,12 @@ def _transcribe_pipeline(audio_file, duration_sec, chat_id, card_msg_id):
 
     except Exception as e:
         log(f"Transcribe pipeline error: {e}")
-        _update_card(card_msg_id, "error", error=str(e))
+        _update_transcribe_card(card_msg_id, "error", error=str(e))
 
 
-def send_dm_markdown(text):
-    """发送 Markdown 格式私聊消息"""
-    result = lark_cmd([
-        "im", "+messages-send", "--as", "bot",
-        "--user-id", JAKE_OPEN_ID,
-        "--markdown", text,
-    ])
-    log("DM (markdown) sent" if result and result.get("ok") else "DM (markdown) failed")
-
+# ============================================================
+# Action dispatch
+# ============================================================
 
 def execute_action(action, params, chat_id, sender_id="", chat_type="group"):
     if action == "meeting":
@@ -772,16 +1018,29 @@ def log(msg):
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
 
-# --- Detection ---
+# ============================================================
+# Detection
+# ============================================================
+
 def is_bot_mentioned(content):
     return bool(re.search(r"@LarkCli-", content, re.IGNORECASE))
+
 
 def extract_text(content):
     return re.sub(r"@\S+[-]\S+(\s+\S+)?\s*", "", content, count=1).strip()
 
 
-# --- Event processing ---
+# ============================================================
+# Event processing
+# ============================================================
+
 def process_event(event):
+    # Setup mode: no config → interactive setup
+    if not CONFIG:
+        if _setup_state["step"] != "done":
+            process_setup(event)
+            return
+
     sender_id = event.get("sender_id", "unknown")
     raw_content = event.get("content") or ""
     chat_id = event.get("chat_id") or ""
@@ -791,17 +1050,28 @@ def process_event(event):
     if msg_type and msg_type != "text":
         return
 
-    is_jake = sender_id == JAKE_OPEN_ID
+    is_owner = sender_id == OWNER_OPEN_ID
 
     # --- 1v1 direct chat ---
     if chat_type == "p2p":
-        if not is_jake:
+        if not is_owner:
             return
         text = extract_text(raw_content) if is_bot_mentioned(raw_content) else raw_content
         if not text.strip():
             return
+
+        # New user onboarding
+        if not is_onboarded(sender_id):
+            mark_onboarded(sender_id)
+            send_welcome_card(chat_id)
+
+        # Help command
+        if text.strip().lower() in HELP_TRIGGERS:
+            send_welcome_card(chat_id)
+            return
+
         log(f"1v1: {text[:80]}")
-        result = parse_ai(call_ai(CHAT_PROMPT, text))
+        result = parse_ai(call_ai(_chat_prompt(), text))
         reply_in_chat(chat_id, result.get("reply", ""))
         action = result.get("action", "none")
         if action != "none":
@@ -816,27 +1086,15 @@ def process_event(event):
     if not text.strip():
         return
 
-    # --- Help command: respond with feature list, skip AI ---
-    if text.strip().lower() in ("help", "帮助"):
-        help_text = (
-            "小J 能做这些事：\n\n"
-            "📅 约会议 — @我 说\"帮我约个会\"\n"
-            "❌ 取消会议 — @我 说\"取消那个会议\"\n"
-            "🔍 查人 — @我 说\"查一下 xxx\"\n"
-            "📋 消息汇总 — @我 说\"汇总一下\"\n"
-            "🔎 定向分析 — @我 说\"帮我看看 XX 提了什么需求\"、\"分析一下 trigger 的内容\"\n"
-            "⏰ 设提醒 — @我 说\"明天中午提醒我写周报\"\n"
-            "🎙️ 会议转写 — 私聊说\"帮我转写\"开始，\"结束转写\"停止\n"
-            "💬 闲聊 — @我 随便说点什么\n\n"
-            "📊 每天 20:00 自动私信 Jake 工作日报"
-        )
+    # Help command → welcome card
+    if text.strip().lower() in HELP_TRIGGERS:
         if chat_id:
-            reply_in_chat(chat_id, help_text)
+            send_welcome_card(chat_id)
         return
 
     log(f"@bot from {sender_id}: {text[:80]}")
 
-    result = parse_ai(call_ai(REPLY_PROMPT, f"发送人: {sender_id}\n消息: {text}"))
+    result = parse_ai(call_ai(_reply_prompt(), f"发送人: {sender_id}\n消息: {text}"))
     reply_text = result.get("reply", "稍等哈～")
     action = result.get("action", "none")
     params = result.get("params", {})
@@ -849,17 +1107,20 @@ def process_event(event):
         log(f"Action {action}: {'ok' if ok else 'failed'}")
 
 
-# --- Scheduled ---
+# ============================================================
+# Scheduled
+# ============================================================
+
 def send_daily_report():
     log("Generating daily report...")
     cal = get_today_calendar()
 
-    # Pull jake-related messages from all chats (today only)
     since = datetime.now().replace(hour=0, minute=0, second=0).isoformat()
     chats_result = lark_cmd(["im", "chats", "list", "--as", "bot",
                              "--params", json.dumps({"page_size": 20})])
     msg_lines = []
-    if chats_result:
+    pattern = _owner_pattern()
+    if chats_result and pattern:
         for c in chats_result.get("data", {}).get("items", []):
             cid = c.get("chat_id", "")
             cname = c.get("name", "")
@@ -867,12 +1128,12 @@ def send_daily_report():
             messages = _pull_chat_messages(cid, since)
             for m in messages:
                 content = m.get("content", "") or ""
-                if re.search(r"Jake\s*R|JakeR|@Jake", content, re.IGNORECASE):
+                if pattern.search(content):
                     sender_name = m.get("sender", {}).get("name", "未知")
                     msg_lines.append(f"[{cname}] {sender_name}: {content[:80]}")
 
     msg_summary = "\n".join(msg_lines) if msg_lines else "今天群里没人提到你"
-    raw = call_ai(REPORT_PROMPT.replace("__CALENDAR__", cal).replace("__MESSAGES__", msg_summary),
+    raw = call_ai(_report_prompt().replace("__CALENDAR__", cal).replace("__MESSAGES__", msg_summary),
                   "请生成日报")
     report = raw or "今天暂无数据。"
     send_dm(f"每日工作日报\n\n{report}")
@@ -884,7 +1145,8 @@ def scheduler():
     while True:
         now = datetime.now()
         if now.hour == 20 and now.minute == 0 and not report_sent:
-            send_daily_report()
+            if CONFIG:  # only send if configured
+                send_daily_report()
             report_sent = True
         elif now.hour == 0 and now.minute == 0:
             report_sent = False
@@ -895,7 +1157,10 @@ def scheduler():
         time.sleep(30)
 
 
-# --- Main ---
+# ============================================================
+# Main
+# ============================================================
+
 def watch_event_dir():
     os.makedirs(EVENT_DIR, exist_ok=True)
     log(f"Watching {EVENT_DIR}")
@@ -921,10 +1186,13 @@ def watch_event_dir():
 
 
 def main():
-    log("Lark Bot v7 starting")
+    mode = "setup" if not CONFIG else "normal"
+    log(f"Lark Bot v8 starting (mode: {mode})")
+    if CONFIG:
+        log(f"Bot: {BOT_NAME}, Owner: {OWNER_NAME}")
+    else:
+        log("No config.json — waiting for first message to start setup")
     log("Actions: meeting, cancel_meeting, search_user, digest, remind, transcribe")
-    log("Daily report: 20:00")
-    log("NO queue, NO background collection — pull on demand only")
 
     t = threading.Thread(target=scheduler, daemon=True)
     t.start()

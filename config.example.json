@@ -1,0 +1,8 @@
+{
+  "bot_name": "",
+  "owner_name": "",
+  "owner_open_id": "",
+  "llm_api_key": "",
+  "llm_base_url": "https://api.minimaxi.com/v1",
+  "llm_model": "MiniMax-M2.5"
+}

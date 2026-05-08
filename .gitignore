@@ -4,4 +4,6 @@ __pycache__/
 *.pyc
 .env
 reminders.json
+config.json
+onboarded_users.json
 .venv/
