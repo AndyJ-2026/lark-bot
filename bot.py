@@ -1,8 +1,9 @@
 """
-Lark Bot v6 — lean version:
+Lark Bot v7 — lean version:
 - @bot in group → AI reply + execute actions
 - @bot "汇总一下" → pull recent messages from API on demand, filter & summarize
 - 1v1 with bot → direct conversation
+- 1v1 "帮我转写" → 录音 + Qwen3-ASR 转写 + AI 纪要 + 飞书文档
 - 20:00 → daily work report
 - NO background queue, NO token waste
 """
@@ -22,6 +23,12 @@ from openai import OpenAI
 MINIMAX_API_KEY = os.environ.get("MINIMAX_API_KEY", "")
 JAKE_OPEN_ID = os.environ.get("JAKE_OPEN_ID", "ou_19af5476f7712283c2bc5f6554d4818b")
 EVENT_DIR = os.environ.get("EVENT_DIR", "/Users/jaker/lark-bot/events")
+AUDIO_CAPTURE_BIN = os.environ.get("AUDIO_CAPTURE_BIN", os.path.expanduser("~/meeting-cli/audio_capture"))
+TRANSCRIBE_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "transcribe_qwen.py")
+VENV_PYTHON = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".venv", "bin", "python")
+VAULT_DIR = os.environ.get("MEETING_VAULT", os.path.expanduser("~/Documents/Obsidian Vault"))
+NOTES_FOLDER = os.environ.get("MEETING_NOTES_FOLDER", "会议纪要")
+TMPDIR_MEETING = os.path.join(os.environ.get("TMPDIR", "/tmp"), "meeting-cli")
 
 minimax = OpenAI(
     api_key=MINIMAX_API_KEY,
@@ -42,6 +49,10 @@ REPLY_PROMPT = """你是 Jake R 的飞书 AI 助手，名叫"小J"。你在群�
 - remind: 设置提醒 → params: time(ISO8601+08:00), message(提醒内容)
   - "明天中午提醒我写周报" → time: 明天12:00的ISO8601, message: "写周报"
   - "下午3点提醒我开会" → time: 今天15:00的ISO8601, message: "开会"
+- transcribe_start: 开始会议转写/录音 → params: {}
+  - "帮我转写"、"开始录音"、"转写会议" → transcribe_start
+- transcribe_stop: 停止转写/录音并生成纪要 → params: {}
+  - "结束转写"、"停止录音"、"结束" → transcribe_stop
 - none: 不需要操作
 
 原则：
@@ -54,26 +65,19 @@ REPLY_PROMPT = """你是 Jake R 的飞书 AI 助手，名叫"小J"。你在群�
 当前时间：__NOW__
 
 JSON 输出（只输出 JSON）：
-{"reply": "纯文本回复", "action": "meeting/cancel_meeting/search_user/digest/remind/none", "params": {}}"""
+{"reply": "纯文本回复", "action": "meeting/cancel_meeting/search_user/digest/remind/transcribe_start/transcribe_stop/none", "params": {}}"""
 
 CHAT_PROMPT = """你是 Jake R 的私人 AI 助手"小J"。1v1 聊天模式。
 - 聪明靠谱，语气轻松
+- 可以查日历、安排事项、查人、设提醒、会议转写、回答问题
 - 不用 markdown，纯文本
-
-你能执行的操作（通过 action 触发）：
-- meeting: 约会议 → params: summary, start(ISO8601+08:00), duration(如1h), attendees(open_id列表，发起人必须包含)
-- cancel_meeting: 取消会议 → params: keyword
-- search_user: 查找同事 → params: query
-- digest: 消息汇总或定向分析 → params: query(用户原始问题，通用汇总时留空), days(时间范围天数，AI根据问题推断，默认7)
-  - 通用汇总（"汇总一下"、"有什么消息"）→ query留空，不需要days
-  - 定向分析（"帮我看看XX提了什么"、"分析一下XX内容"）→ query填用户原始问题，days根据上下文推断
-- remind: 设置提醒 → params: time(ISO8601+08:00), message(提醒内容)
-- none: 不需要操作
-
+- 约会议/设提醒时间用 ISO8601+08:00
+- "帮我转写"/"开始录音" → transcribe_start
+- "结束转写"/"停止录音"/"结束" → transcribe_stop
 当前时间：__NOW__
 
 JSON 输出：
-{"reply": "纯文本回复", "action": "meeting/cancel_meeting/search_user/digest/remind/none", "params": {}}"""
+{"reply": "纯文本回复", "action": "meeting/cancel_meeting/search_user/digest/remind/transcribe_start/transcribe_stop/none", "params": {}}"""
 
 REPORT_PROMPT = """根据以下信息生成简洁的每日工作日报。
 
@@ -92,6 +96,36 @@ DIGEST_PROMPT = """以下是最近群聊中与 Jake R 相关的消息。请帮�
 
 消息列表：
 __MESSAGES__"""
+
+MINUTES_PROMPT = """你是一个专业的会议纪要助手。根据以下会议转写内容，生成一份结构化的会议纪要（Markdown 格式）。
+
+要求：
+1. 用中文输出
+2. 按以下格式组织：
+
+# 会议纪要
+
+## 基本信息
+- 日期：__DATE__
+- 时长：__DURATION__
+
+## 会议要点
+（按讨论顺序，列出 3-5 个关键议题及结论）
+
+## 决策事项
+（明确列出达成的决定）
+
+## 待办事项
+（格式：- 事项内容 @负责人）
+
+## 关键讨论记录
+（保留重要的讨论细节和观点）
+"""
+
+MINUTES_SUMMARY_PROMPT = """根据以下会议纪要，用一两句话概括会议主题和核心结论。纯文本，不要 markdown。
+
+纪要内容：
+__MINUTES__"""
 
 ANALYSIS_PROMPT = """你是飞书群消息分析助手。根据用户的问题，从群聊消息中提取相关信息并回答。
 
@@ -450,6 +484,256 @@ def check_reminders():
         save_reminders(remaining)
 
 
+# --- Transcribe ---
+_transcribe_state = {
+    "active": False,
+    "process": None,
+    "audio_file": None,
+    "start_time": None,
+    "chat_id": None,
+    "card_msg_id": None,
+}
+
+ASR_ENGINE = "本地（SenseVoice）"
+
+
+def _build_card(status, **kwargs):
+    """构建不同状态的卡片 JSON"""
+    if status == "recording":
+        start_time = kwargs.get("start_time", "")
+        content = f"🎙️ **正在录音中...**\n开始时间：{start_time}\n引擎：{ASR_ENGINE}\n\n💡 说「结束转写」即可停止并生成纪要"
+    elif status == "transcribing":
+        duration = kwargs.get("duration", "")
+        content = f"⏳ **转写中...**\n录音时长：{duration}\n引擎：{ASR_ENGINE}"
+    elif status == "done":
+        duration = kwargs.get("duration", "")
+        summary = kwargs.get("summary", "会议纪要已生成")
+        doc_url = kwargs.get("doc_url", "")
+        content = f"✅ **会议纪要已生成**\n时长：{duration} | 引擎：{ASR_ENGINE}\n\n{summary}"
+        if doc_url:
+            content += f"\n\n[📄 查看完整纪要]({doc_url})"
+    elif status == "error":
+        error_msg = kwargs.get("error", "未知错误")
+        content = f"❌ **转写失败**\n{error_msg}"
+    else:
+        content = status
+
+    card = json.dumps({"elements": [{"tag": "markdown", "content": content}]})
+    return card
+
+
+def _send_card(chat_id, status, **kwargs):
+    """发送卡片消息，返回 message_id"""
+    card = _build_card(status, **kwargs)
+    result = lark_cmd([
+        "im", "+messages-send", "--as", "bot",
+        "--chat-id", chat_id,
+        "--msg-type", "interactive",
+        "--content", card,
+    ])
+    if result and result.get("ok"):
+        msg_id = result.get("data", {}).get("message_id", "")
+        log(f"Card sent: {msg_id}")
+        return msg_id
+    log("Card send failed")
+    return ""
+
+
+def _update_card(msg_id, status, **kwargs):
+    """更新已发送的卡片"""
+    if not msg_id:
+        return
+    card = _build_card(status, **kwargs)
+    result = lark_cmd([
+        "api", "PATCH", f"/open-apis/im/v1/messages/{msg_id}",
+        "--as", "bot",
+        "--data", json.dumps({"msg_type": "interactive", "content": card}),
+    ])
+    ok = result and result.get("code") == 0
+    log(f"Card update {'ok' if ok else 'failed'}: {msg_id}")
+
+
+def do_transcribe_start(chat_id):
+    if _transcribe_state["active"]:
+        if chat_id:
+            reply_in_chat(chat_id, "已经在录音了，说「结束转写」就可以停止~")
+        return True
+
+    if not os.path.isfile(AUDIO_CAPTURE_BIN):
+        if chat_id:
+            reply_in_chat(chat_id, f"audio_capture 没找到: {AUDIO_CAPTURE_BIN}")
+        return False
+
+    os.makedirs(TMPDIR_MEETING, exist_ok=True)
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    audio_file = os.path.join(TMPDIR_MEETING, f"bot_{timestamp}.pcm")
+
+    try:
+        proc = subprocess.Popen(
+            [AUDIO_CAPTURE_BIN],
+            stdout=open(audio_file, "wb"),
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception as e:
+        log(f"audio_capture start failed: {e}")
+        if chat_id:
+            reply_in_chat(chat_id, "录音启动失败了，检查一下 audio_capture 权限？")
+        return False
+
+    _transcribe_state["active"] = True
+    _transcribe_state["process"] = proc
+    _transcribe_state["audio_file"] = audio_file
+    _transcribe_state["start_time"] = time.time()
+    _transcribe_state["chat_id"] = chat_id
+
+    # 发送录音状态卡片
+    card_msg_id = ""
+    if chat_id:
+        card_msg_id = _send_card(chat_id, "recording",
+                                 start_time=time.strftime("%H:%M"))
+    _transcribe_state["card_msg_id"] = card_msg_id
+
+    log(f"Transcribe started: {audio_file}")
+    return True
+
+
+def do_transcribe_stop(chat_id):
+    if not _transcribe_state["active"]:
+        if chat_id:
+            reply_in_chat(chat_id, "现在没有在录音哦")
+        return False
+
+    proc = _transcribe_state["process"]
+    audio_file = _transcribe_state["audio_file"]
+    start_time = _transcribe_state["start_time"]
+    card_msg_id = _transcribe_state["card_msg_id"]
+    duration_sec = time.time() - start_time if start_time else 0
+
+    # 停止录音
+    if proc:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+    _transcribe_state["active"] = False
+    _transcribe_state["process"] = None
+
+    duration_str = f"{int(duration_sec // 60)} 分钟"
+
+    # 更新卡片为转写中状态
+    _update_card(card_msg_id, "transcribing", duration=duration_str)
+
+    # 后台线程处理转写流水线
+    t = threading.Thread(
+        target=_transcribe_pipeline,
+        args=(audio_file, duration_sec, chat_id, card_msg_id),
+        daemon=True,
+    )
+    t.start()
+    log(f"Transcribe stopped, pipeline started in background")
+    return True
+
+
+def _transcribe_pipeline(audio_file, duration_sec, chat_id, card_msg_id):
+    """后台转写流水线：转写 → 纪要 → Obsidian → 飞书文档 → 更新卡片"""
+    duration_str = f"{int(duration_sec // 60)} 分钟"
+    try:
+        # 1. 转写
+        transcript_file = audio_file.replace(".pcm", ".txt")
+        log(f"Running SenseVoice on {audio_file}...")
+        transcribe_python = VENV_PYTHON if os.path.isfile(VENV_PYTHON) else sys.executable
+        result = subprocess.run(
+            [transcribe_python, TRANSCRIBE_SCRIPT, "--input", audio_file, "--output", transcript_file],
+            capture_output=True, text=True, timeout=1800,
+        )
+        if result.returncode != 0:
+            log(f"Transcribe failed: {result.stderr[:300]}")
+            _update_card(card_msg_id, "error", error="转写失败，可能是音频太短或模型出错")
+            return
+
+        if not os.path.isfile(transcript_file):
+            _update_card(card_msg_id, "error", error="转写结果为空，可能会议中没有语音")
+            return
+
+        with open(transcript_file, encoding="utf-8") as f:
+            transcript = f.read()
+
+        if not transcript.strip():
+            _update_card(card_msg_id, "error", error="转写结果为空")
+            return
+
+        log(f"Transcription done: {len(transcript)} chars")
+
+        # 2. AI 生成纪要
+        date_str = time.strftime("%Y-%m-%d")
+        prompt = MINUTES_PROMPT.replace("__DATE__", date_str).replace("__DURATION__", duration_str)
+        minutes_md = call_ai(prompt, transcript)
+        if not minutes_md:
+            minutes_md = f"# 会议转写 {date_str}\n\n{transcript}"
+
+        # 3. 保存到 Obsidian
+        notes_dir = os.path.join(VAULT_DIR, NOTES_FOLDER)
+        os.makedirs(notes_dir, exist_ok=True)
+        ts = time.strftime("%Y%m%d_%H%M%S")
+        note_file = os.path.join(notes_dir, f"{date_str} 会议纪要_{ts}.md")
+        with open(note_file, "w", encoding="utf-8") as f:
+            f.write(minutes_md)
+        log(f"Minutes saved to Obsidian: {note_file}")
+
+        # 4. 创建飞书云文档
+        doc_title = f"{date_str} 会议纪要"
+        doc_result = lark_cmd([
+            "docs", "+create",
+            "--title", doc_title,
+            "--markdown", minutes_md,
+        ])
+        doc_url = ""
+        if doc_result and doc_result.get("ok"):
+            doc_url = doc_result.get("data", {}).get("url", "")
+            log(f"Lark doc created: {doc_url}")
+        else:
+            log("Lark doc creation failed")
+
+        # 5. 生成会议概括
+        summary_text = call_ai(
+            MINUTES_SUMMARY_PROMPT.replace("__MINUTES__", minutes_md),
+            "请概括",
+        )
+        if not summary_text:
+            summary_text = "会议纪要已生成"
+
+        # 6. 更新卡片为完成状态
+        _update_card(card_msg_id, "done",
+                     duration=duration_str,
+                     summary=summary_text,
+                     doc_url=doc_url)
+        log("Card updated to done")
+
+        # 7. 清理临时文件
+        for f in [audio_file, transcript_file]:
+            try:
+                os.remove(f)
+            except OSError:
+                pass
+        log("Temp files cleaned up")
+
+    except Exception as e:
+        log(f"Transcribe pipeline error: {e}")
+        _update_card(card_msg_id, "error", error=str(e))
+
+
+def send_dm_markdown(text):
+    """发送 Markdown 格式私聊消息"""
+    result = lark_cmd([
+        "im", "+messages-send", "--as", "bot",
+        "--user-id", JAKE_OPEN_ID,
+        "--markdown", text,
+    ])
+    log("DM (markdown) sent" if result and result.get("ok") else "DM (markdown) failed")
+
+
 def execute_action(action, params, chat_id, sender_id="", chat_type="group"):
     if action == "meeting":
         return do_meeting(params, chat_id, sender_id)
@@ -461,6 +745,10 @@ def execute_action(action, params, chat_id, sender_id="", chat_type="group"):
         return do_digest(chat_id, params.get("query", ""), params.get("days", 0), chat_type)
     elif action == "remind":
         return do_remind(params, chat_id, sender_id)
+    elif action == "transcribe_start":
+        return do_transcribe_start(chat_id)
+    elif action == "transcribe_stop":
+        return do_transcribe_stop(chat_id)
     return False
 
 
@@ -538,6 +826,7 @@ def process_event(event):
             "📋 消息汇总 — @我 说\"汇总一下\"\n"
             "🔎 定向分析 — @我 说\"帮我看看 XX 提了什么需求\"、\"分析一下 trigger 的内容\"\n"
             "⏰ 设提醒 — @我 说\"明天中午提醒我写周报\"\n"
+            "🎙️ 会议转写 — 私聊说\"帮我转写\"开始，\"结束转写\"停止\n"
             "💬 闲聊 — @我 随便说点什么\n\n"
             "📊 每天 20:00 自动私信 Jake 工作日报"
         )
@@ -632,8 +921,8 @@ def watch_event_dir():
 
 
 def main():
-    log("Lark Bot v6 starting")
-    log("Actions: meeting, cancel_meeting, search_user, digest, remind")
+    log("Lark Bot v7 starting")
+    log("Actions: meeting, cancel_meeting, search_user, digest, remind, transcribe")
     log("Daily report: 20:00")
     log("NO queue, NO background collection — pull on demand only")
 
