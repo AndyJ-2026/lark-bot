@@ -291,21 +291,39 @@ def _format_message(m, chat_name=""):
     return f"{prefix}{ts} {sender_name}: {content[:200]}"
 
 
-def do_digest(chat_id, query="", days=0):
+def do_digest(chat_id, query="", days=0, chat_type="group"):
     """Message digest with two modes: targeted analysis (with query) or general summary."""
 
     if query:
-        # --- Targeted analysis: current chat only, no Jake filter ---
+        # --- Targeted analysis ---
         if chat_id:
             reply_in_chat(chat_id, "我去翻翻消息，帮你分析一下~")
         if not days:
             days = 7
         since = (datetime.now() - timedelta(days=days)).isoformat()
-        messages = _pull_chat_messages(chat_id, since)
+
+        if chat_type == "p2p":
+            # Triggered from private chat — scan all group chats
+            chats_result = lark_cmd(["im", "chats", "list", "--as", "bot",
+                                     "--params", json.dumps({"page_size": 20})])
+            messages = []
+            if chats_result:
+                for c in chats_result.get("data", {}).get("items", []):
+                    cid = c.get("chat_id", "")
+                    cname = c.get("name", "未知群")
+                    if not cid:
+                        continue
+                    chat_msgs = _pull_chat_messages(cid, since)
+                    for m in chat_msgs:
+                        m["_chat_name"] = cname
+                    messages.extend(chat_msgs)
+        else:
+            messages = _pull_chat_messages(chat_id, since)
+
         if not messages:
             if chat_id: reply_in_chat(chat_id, f"最近 {days} 天没找到消息")
             return True
-        msg_lines = [_format_message(m) for m in messages]
+        msg_lines = [_format_message(m, m.get("_chat_name", "")) for m in messages]
         msg_text = "\n".join(msg_lines)
         prompt = ANALYSIS_PROMPT.replace("__QUERY__", query).replace("__MESSAGES__", msg_text)
         raw = call_ai(prompt, "请分析")
@@ -432,7 +450,7 @@ def check_reminders():
         save_reminders(remaining)
 
 
-def execute_action(action, params, chat_id, sender_id=""):
+def execute_action(action, params, chat_id, sender_id="", chat_type="group"):
     if action == "meeting":
         return do_meeting(params, chat_id, sender_id)
     elif action == "cancel_meeting":
@@ -440,7 +458,7 @@ def execute_action(action, params, chat_id, sender_id=""):
     elif action == "search_user":
         return do_search_user(params, chat_id)
     elif action == "digest":
-        return do_digest(chat_id, params.get("query", ""), params.get("days", 0))
+        return do_digest(chat_id, params.get("query", ""), params.get("days", 0), chat_type)
     elif action == "remind":
         return do_remind(params, chat_id, sender_id)
     return False
@@ -499,7 +517,7 @@ def process_event(event):
         reply_in_chat(chat_id, result.get("reply", ""))
         action = result.get("action", "none")
         if action != "none":
-            execute_action(action, result.get("params", {}), chat_id, sender_id)
+            execute_action(action, result.get("params", {}), chat_id, sender_id, chat_type="p2p")
         return
 
     # --- Group: only respond to @bot ---
