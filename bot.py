@@ -473,7 +473,66 @@ _transcribe_state = {
     "audio_file": None,
     "start_time": None,
     "chat_id": None,
+    "card_msg_id": None,
 }
+
+ASR_ENGINE = "本地（SenseVoice）"
+
+
+def _build_card(status, **kwargs):
+    """构建不同状态的卡片 JSON"""
+    if status == "recording":
+        start_time = kwargs.get("start_time", "")
+        content = f"🎙️ **正在录音中...**\n开始时间：{start_time}\n引擎：{ASR_ENGINE}\n\n💡 说「结束转写」即可停止并生成纪要"
+    elif status == "transcribing":
+        duration = kwargs.get("duration", "")
+        content = f"⏳ **转写中...**\n录音时长：{duration}\n引擎：{ASR_ENGINE}"
+    elif status == "done":
+        duration = kwargs.get("duration", "")
+        summary = kwargs.get("summary", "会议纪要已生成")
+        doc_url = kwargs.get("doc_url", "")
+        content = f"✅ **会议纪要已生成**\n时长：{duration} | 引擎：{ASR_ENGINE}\n\n{summary}"
+        if doc_url:
+            content += f"\n\n[📄 查看完整纪要]({doc_url})"
+    elif status == "error":
+        error_msg = kwargs.get("error", "未知错误")
+        content = f"❌ **转写失败**\n{error_msg}"
+    else:
+        content = status
+
+    card = json.dumps({"elements": [{"tag": "markdown", "content": content}]})
+    return card
+
+
+def _send_card(chat_id, status, **kwargs):
+    """发送卡片消息，返回 message_id"""
+    card = _build_card(status, **kwargs)
+    result = lark_cmd([
+        "im", "+messages-send", "--as", "bot",
+        "--chat-id", chat_id,
+        "--msg-type", "interactive",
+        "--content", card,
+    ])
+    if result and result.get("ok"):
+        msg_id = result.get("data", {}).get("message_id", "")
+        log(f"Card sent: {msg_id}")
+        return msg_id
+    log("Card send failed")
+    return ""
+
+
+def _update_card(msg_id, status, **kwargs):
+    """更新已发送的卡片"""
+    if not msg_id:
+        return
+    card = _build_card(status, **kwargs)
+    result = lark_cmd([
+        "api", "PATCH", f"/open-apis/im/v1/messages/{msg_id}",
+        "--as", "bot",
+        "--data", json.dumps({"msg_type": "interactive", "content": card}),
+    ])
+    ok = result and result.get("code") == 0
+    log(f"Card update {'ok' if ok else 'failed'}: {msg_id}")
 
 
 def do_transcribe_start(chat_id):
@@ -509,8 +568,13 @@ def do_transcribe_start(chat_id):
     _transcribe_state["start_time"] = time.time()
     _transcribe_state["chat_id"] = chat_id
 
+    # 发送录音状态卡片
+    card_msg_id = ""
     if chat_id:
-        reply_in_chat(chat_id, "开始录音了，会议结束后跟我说「结束转写」~")
+        card_msg_id = _send_card(chat_id, "recording",
+                                 start_time=time.strftime("%H:%M"))
+    _transcribe_state["card_msg_id"] = card_msg_id
+
     log(f"Transcribe started: {audio_file}")
     return True
 
@@ -524,6 +588,7 @@ def do_transcribe_stop(chat_id):
     proc = _transcribe_state["process"]
     audio_file = _transcribe_state["audio_file"]
     start_time = _transcribe_state["start_time"]
+    card_msg_id = _transcribe_state["card_msg_id"]
     duration_sec = time.time() - start_time if start_time else 0
 
     # 停止录音
@@ -538,13 +603,14 @@ def do_transcribe_stop(chat_id):
     _transcribe_state["process"] = None
 
     duration_str = f"{int(duration_sec // 60)} 分钟"
-    if chat_id:
-        reply_in_chat(chat_id, f"录音结束（{duration_str}），正在转写+生成纪要，请稍候...")
+
+    # 更新卡片为转写中状态
+    _update_card(card_msg_id, "transcribing", duration=duration_str)
 
     # 后台线程处理转写流水线
     t = threading.Thread(
         target=_transcribe_pipeline,
-        args=(audio_file, duration_sec, chat_id),
+        args=(audio_file, duration_sec, chat_id, card_msg_id),
         daemon=True,
     )
     t.start()
@@ -552,12 +618,13 @@ def do_transcribe_stop(chat_id):
     return True
 
 
-def _transcribe_pipeline(audio_file, duration_sec, chat_id):
-    """后台转写流水线：转写 → 纪要 → Obsidian → 飞书文档 → 私聊"""
+def _transcribe_pipeline(audio_file, duration_sec, chat_id, card_msg_id):
+    """后台转写流水线：转写 → 纪要 → Obsidian → 飞书文档 → 更新卡片"""
+    duration_str = f"{int(duration_sec // 60)} 分钟"
     try:
         # 1. 转写
         transcript_file = audio_file.replace(".pcm", ".txt")
-        log(f"Running Qwen3-ASR on {audio_file}...")
+        log(f"Running SenseVoice on {audio_file}...")
         transcribe_python = VENV_PYTHON if os.path.isfile(VENV_PYTHON) else sys.executable
         result = subprocess.run(
             [transcribe_python, TRANSCRIBE_SCRIPT, "--input", audio_file, "--output", transcript_file],
@@ -565,26 +632,25 @@ def _transcribe_pipeline(audio_file, duration_sec, chat_id):
         )
         if result.returncode != 0:
             log(f"Transcribe failed: {result.stderr[:300]}")
-            send_dm("转写失败了，可能是音频太短或模型出错")
+            _update_card(card_msg_id, "error", error="转写失败，可能是音频太短或模型出错")
             return
 
         if not os.path.isfile(transcript_file):
-            send_dm("转写结果为空，可能会议中没有语音")
+            _update_card(card_msg_id, "error", error="转写结果为空，可能会议中没有语音")
             return
 
         with open(transcript_file, encoding="utf-8") as f:
             transcript = f.read()
 
         if not transcript.strip():
-            send_dm("转写结果为空")
+            _update_card(card_msg_id, "error", error="转写结果为空")
             return
 
         log(f"Transcription done: {len(transcript)} chars")
 
         # 2. AI 生成纪要
         date_str = time.strftime("%Y-%m-%d")
-        duration_min = f"{int(duration_sec // 60)} 分钟"
-        prompt = MINUTES_PROMPT.replace("__DATE__", date_str).replace("__DURATION__", duration_min)
+        prompt = MINUTES_PROMPT.replace("__DATE__", date_str).replace("__DURATION__", duration_str)
         minutes_md = call_ai(prompt, transcript)
         if not minutes_md:
             minutes_md = f"# 会议转写 {date_str}\n\n{transcript}"
@@ -592,8 +658,8 @@ def _transcribe_pipeline(audio_file, duration_sec, chat_id):
         # 3. 保存到 Obsidian
         notes_dir = os.path.join(VAULT_DIR, NOTES_FOLDER)
         os.makedirs(notes_dir, exist_ok=True)
-        timestamp = time.strftime("%Y%m%d_%H%M%S")
-        note_file = os.path.join(notes_dir, f"{date_str} 会议纪要_{timestamp}.md")
+        ts = time.strftime("%Y%m%d_%H%M%S")
+        note_file = os.path.join(notes_dir, f"{date_str} 会议纪要_{ts}.md")
         with open(note_file, "w", encoding="utf-8") as f:
             f.write(minutes_md)
         log(f"Minutes saved to Obsidian: {note_file}")
@@ -620,14 +686,12 @@ def _transcribe_pipeline(audio_file, duration_sec, chat_id):
         if not summary_text:
             summary_text = "会议纪要已生成"
 
-        # 6. 私聊发送：概括 + 文档链接
-        if doc_url:
-            msg = f"{summary_text}\n\n会议纪要: {doc_url}"
-        else:
-            msg = f"{summary_text}\n\n（飞书文档创建失败，纪要已保存到 Obsidian）"
-
-        send_dm_markdown(msg)
-        log("Minutes sent to Jake via DM")
+        # 6. 更新卡片为完成状态
+        _update_card(card_msg_id, "done",
+                     duration=duration_str,
+                     summary=summary_text,
+                     doc_url=doc_url)
+        log("Card updated to done")
 
         # 7. 清理临时文件
         for f in [audio_file, transcript_file]:
@@ -639,7 +703,7 @@ def _transcribe_pipeline(audio_file, duration_sec, chat_id):
 
     except Exception as e:
         log(f"Transcribe pipeline error: {e}")
-        send_dm(f"转写流水线出错了: {e}")
+        _update_card(card_msg_id, "error", error=str(e))
 
 
 def send_dm_markdown(text):
