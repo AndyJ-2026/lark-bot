@@ -478,6 +478,7 @@ def send_welcome_card(chat_id):
 
 
 HELP_TRIGGERS = {"help", "帮助", "你能做什么", "你会什么"}
+CHAT_LIST_KEYWORDS = ["哪些群", "加了什么群", "在哪些群", "群列表", "加入的群"]
 
 
 # ============================================================
@@ -1070,6 +1071,15 @@ def process_event(event):
             send_welcome_card(chat_id)
             return
 
+        # Chat list query
+        if any(kw in text for kw in CHAT_LIST_KEYWORDS):
+            chats = _get_bot_chats()
+            if chats:
+                reply_in_chat(chat_id, "我加入了这些群：\n" + "\n".join(f"• {name}" for name in chats))
+            else:
+                reply_in_chat(chat_id, "我还没有加入任何群，把我拉进群就行~")
+            return
+
         log(f"1v1: {text[:80]}")
         result = parse_ai(call_ai(_chat_prompt(), text))
         reply_in_chat(chat_id, result.get("reply", ""))
@@ -1090,6 +1100,15 @@ def process_event(event):
     if text.strip().lower() in HELP_TRIGGERS:
         if chat_id:
             send_welcome_card(chat_id)
+        return
+
+    # Chat list query
+    if any(kw in text for kw in CHAT_LIST_KEYWORDS):
+        chats = _get_bot_chats()
+        if chats:
+            reply_in_chat(chat_id, "我加入了这些群：\n" + "\n".join(f"• {name}" for name in chats))
+        else:
+            reply_in_chat(chat_id, "我还没有加入任何群，把我拉进群就行~")
         return
 
     log(f"@bot from {sender_id}: {text[:80]}")
