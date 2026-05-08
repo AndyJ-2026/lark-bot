@@ -39,6 +39,9 @@ REPLY_PROMPT = """你是 Jake R 的飞书 AI 助手，名叫"小J"。你在群�
 - digest: 消息汇总或定向分析 → params: query(用户原始问题，通用汇总时留空), days(时间范围天数，AI根据问题推断，默认7)
   - 通用汇总（"汇总一下"、"有什么消息"）→ query留空，不需要days
   - 定向分析（"帮我看看XX提了什么"、"分析一下XX内容"）→ query填用户原始问题，days根据上下文推断
+- remind: 设置提醒 → params: time(ISO8601+08:00), message(提醒内容)
+  - "明天中午提醒我写周报" → time: 明天12:00的ISO8601, message: "写周报"
+  - "下午3点提醒我开会" → time: 今天15:00的ISO8601, message: "开会"
 - none: 不需要操作
 
 原则：
@@ -51,17 +54,17 @@ REPLY_PROMPT = """你是 Jake R 的飞书 AI 助手，名叫"小J"。你在群�
 当前时间：__NOW__
 
 JSON 输出（只输出 JSON）：
-{"reply": "纯文本回复", "action": "meeting/cancel_meeting/search_user/digest/none", "params": {}}"""
+{"reply": "纯文本回复", "action": "meeting/cancel_meeting/search_user/digest/remind/none", "params": {}}"""
 
 CHAT_PROMPT = """你是 Jake R 的私人 AI 助手"小J"。1v1 聊天模式。
 - 聪明靠谱，语气轻松
-- 可以查日历、安排事项、查人、回答问题
+- 可以查日历、安排事项、查人、设提醒、回答问题
 - 不用 markdown，纯文本
-- 约会议时间用 ISO8601+08:00
+- 约会议/设提醒时间用 ISO8601+08:00
 当前时间：__NOW__
 
 JSON 输出：
-{"reply": "纯文本回复", "action": "meeting/cancel_meeting/search_user/digest/none", "params": {}}"""
+{"reply": "纯文本回复", "action": "meeting/cancel_meeting/search_user/digest/remind/none", "params": {}}"""
 
 REPORT_PROMPT = """根据以下信息生成简洁的每日工作日报。
 
@@ -346,6 +349,80 @@ def do_digest(chat_id, query="", days=0):
     return True
 
 
+REMINDERS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "reminders.json")
+
+
+def load_reminders():
+    if os.path.exists(REMINDERS_FILE):
+        try:
+            with open(REMINDERS_FILE) as f:
+                return json.load(f)
+        except (json.JSONDecodeError, IOError):
+            return []
+    return []
+
+
+def save_reminders(reminders):
+    with open(REMINDERS_FILE, "w") as f:
+        json.dump(reminders, f, indent=2, ensure_ascii=False)
+
+
+def do_remind(params, chat_id, sender_id=""):
+    time_str = params.get("time", "")
+    message = params.get("message", "")
+    if not time_str or not message:
+        if chat_id: reply_in_chat(chat_id, "时间或内容没说清楚，再说一次？")
+        return False
+    try:
+        remind_time = datetime.fromisoformat(time_str)
+        if remind_time.tzinfo and remind_time <= datetime.now(remind_time.tzinfo):
+            if chat_id: reply_in_chat(chat_id, "这个时间已经过了哦")
+            return False
+    except ValueError:
+        if chat_id: reply_in_chat(chat_id, "时间格式不对，再说一次？")
+        return False
+    reminders = load_reminders()
+    reminders.append({
+        "time": time_str,
+        "message": message,
+        "chat_id": chat_id,
+        "sender_id": sender_id,
+        "created": datetime.now().isoformat(),
+    })
+    save_reminders(reminders)
+    display = remind_time.strftime("%m月%d日 %H:%M")
+    if chat_id: reply_in_chat(chat_id, f"好的，{display} 提醒你：{message}")
+    log(f"Reminder set: {display} → {message}")
+    return True
+
+
+def check_reminders():
+    reminders = load_reminders()
+    if not reminders:
+        return
+    now = datetime.now().astimezone()
+    remaining = []
+    for r in reminders:
+        try:
+            t = datetime.fromisoformat(r["time"])
+            if not t.tzinfo:
+                t = t.astimezone()
+        except ValueError:
+            continue
+        if now >= t:
+            if (now - t).total_seconds() > 86400:
+                log(f"Reminder expired >24h, discarding: {r['message']}")
+                continue
+            chat_id = r.get("chat_id", "")
+            if chat_id:
+                reply_in_chat(chat_id, f"⏰ 提醒：{r['message']}")
+            log(f"Reminder fired: {r['message']}")
+        else:
+            remaining.append(r)
+    if len(remaining) != len(reminders):
+        save_reminders(remaining)
+
+
 def execute_action(action, params, chat_id, sender_id=""):
     if action == "meeting":
         return do_meeting(params, chat_id, sender_id)
@@ -355,6 +432,8 @@ def execute_action(action, params, chat_id, sender_id=""):
         return do_search_user(params, chat_id)
     elif action == "digest":
         return do_digest(chat_id, params.get("query", ""), params.get("days", 0))
+    elif action == "remind":
+        return do_remind(params, chat_id, sender_id)
     return False
 
 
@@ -431,6 +510,7 @@ def process_event(event):
             "🔍 查人 — @我 说\"查一下 xxx\"\n"
             "📋 消息汇总 — @我 说\"汇总一下\"\n"
             "🔎 定向分析 — @我 说\"帮我看看 XX 提了什么需求\"、\"分析一下 trigger 的内容\"\n"
+            "⏰ 设提醒 — @我 说\"明天中午提醒我写周报\"\n"
             "💬 闲聊 — @我 随便说点什么\n\n"
             "📊 每天 20:00 自动私信 Jake 工作日报"
         )
@@ -492,6 +572,10 @@ def scheduler():
             report_sent = True
         elif now.hour == 0 and now.minute == 0:
             report_sent = False
+        try:
+            check_reminders()
+        except Exception as e:
+            log(f"Reminder check error: {e}")
         time.sleep(30)
 
 
@@ -522,7 +606,7 @@ def watch_event_dir():
 
 def main():
     log("Lark Bot v6 starting")
-    log("Actions: meeting, cancel_meeting, search_user, digest (on-demand)")
+    log("Actions: meeting, cancel_meeting, search_user, digest, remind")
     log("Daily report: 20:00")
     log("NO queue, NO background collection — pull on demand only")
 
