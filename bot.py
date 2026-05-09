@@ -690,7 +690,10 @@ def _send_card_to_user(user_id, card):
         "--msg-type", "interactive",
         "--content", card,
     ])
-    return result and result.get("ok")
+    ok = result and result.get("ok")
+    if not ok:
+        log(f"Cannot DM user {user_id} (user may not have chatted with bot yet)")
+    return ok
 
 
 def do_task_create(params, chat_id, sender_id=""):
@@ -1515,7 +1518,7 @@ def process_event(event):
         reply_text = result.get("reply", "")
         # Save conversation to history
         _append_chat_history(sender_id, "user", text)
-        _append_chat_history(sender_id, "assistant", raw or reply_text)
+        _append_chat_history(sender_id, "assistant", reply_text)
         reply_in_chat(chat_id, reply_text)
         action = result.get("action", "none")
         if action != "none":
