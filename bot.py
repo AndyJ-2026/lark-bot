@@ -1490,7 +1490,7 @@ def _transcribe_pipeline(audio_file, duration_sec, chat_id, card_msg_id):
         ])
         doc_url = ""
         if doc_result and doc_result.get("ok"):
-            doc_url = doc_result.get("data", {}).get("url", "")
+            doc_url = doc_result.get("data", {}).get("doc_url", "") or doc_result.get("data", {}).get("url", "")
             log(f"Lark doc created: {doc_url}")
         else:
             log("Lark doc creation failed")
