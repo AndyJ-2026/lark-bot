@@ -1733,9 +1733,39 @@ def _send_online_card(reconnect=False):
         _send_card_to_user(OWNER_OPEN_ID, card)
 
 
+LOCK_FILE = os.path.join(BOT_DIR, ".bot.lock")
+
+
+def _acquire_lock():
+    """Ensure only one bot.py instance runs. Exit if another is alive."""
+    if os.path.exists(LOCK_FILE):
+        try:
+            with open(LOCK_FILE) as f:
+                old_pid = int(f.read().strip())
+            # Check if that process is still alive
+            os.kill(old_pid, 0)
+            log(f"Another bot.py is running (PID {old_pid}), exiting.")
+            sys.exit(0)
+        except (ProcessLookupError, ValueError, OSError):
+            pass  # stale lock, proceed
+    with open(LOCK_FILE, "w") as f:
+        f.write(str(os.getpid()))
+
+
+def _release_lock():
+    try:
+        os.remove(LOCK_FILE)
+    except OSError:
+        pass
+
+
 def main():
+    _acquire_lock()
+    import atexit
+    atexit.register(_release_lock)
+
     mode = "setup" if not CONFIG else "normal"
-    log(f"Lark Bot v8 starting (mode: {mode})")
+    log(f"Lark Bot v8 starting (mode: {mode}, PID: {os.getpid()})")
     if CONFIG:
         log(f"Bot: {BOT_NAME}, Owner: {OWNER_NAME}")
     else:

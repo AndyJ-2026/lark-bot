@@ -3,17 +3,20 @@
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
+PLIST="$HOME/Library/LaunchAgents/com.jaker.lark-bot.plist"
+PIDFILE="$SCRIPT_DIR/.bot.pid"
+
+# Pause LaunchAgent to prevent it from respawning processes we're about to kill
+if [ -f "$PLIST" ]; then
+    launchctl unload "$PLIST" 2>/dev/null
+    echo "LaunchAgent 已暂停"
+fi
+
 # Kill any existing bot processes
 echo "检查残留进程..."
-pkill -f "python.*bot\.py" 2>/dev/null
-pkill -f "lark-cli.*event.*subscribe.*output-dir.*events" 2>/dev/null
+pkill -9 -f "python.*bot\.py" 2>/dev/null
+pkill -9 -f "lark-cli.*event.*subscribe" 2>/dev/null
 sleep 1
-
-# Double check — force kill if still alive
-if pgrep -f "python.*bot\.py" >/dev/null 2>&1; then
-    pkill -9 -f "python.*bot\.py" 2>/dev/null
-    sleep 1
-fi
 
 # Clear stale event files
 rm -f "$SCRIPT_DIR/events/"*.json 2>/dev/null
@@ -32,9 +35,15 @@ export EVENT_DIR="$SCRIPT_DIR/events"
 # Start bot (bot.py now manages lark-cli subscriber internally)
 python3 -u bot.py &
 BOT_PID=$!
+echo "$BOT_PID" > "$PIDFILE"
 echo "bot.py 已启动 (PID: $BOT_PID)"
 
+# Re-enable LaunchAgent (it won't double-start because KeepAlive watches the PID)
+if [ -f "$PLIST" ]; then
+    launchctl load "$PLIST" 2>/dev/null
+fi
+
 # Cleanup on exit
-trap "kill $BOT_PID 2>/dev/null; pkill -f 'lark-cli.*event.*subscribe' 2>/dev/null; echo '已停止'" EXIT INT TERM
+trap "kill $BOT_PID 2>/dev/null; pkill -f 'lark-cli.*event.*subscribe' 2>/dev/null; rm -f '$PIDFILE'; echo '已停止'" EXIT INT TERM
 
 wait $BOT_PID
