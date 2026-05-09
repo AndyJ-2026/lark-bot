@@ -110,8 +110,8 @@ def _reply_prompt():
   - "下午3点提醒我开会" → time: 今天15:00的ISO8601, message: "开会"
 - daily_report: 查看今日工作日报 → params: {{}}
   - "日报"、"今天工作怎么样" → daily_report
-- task_create: 创建任务 → params: summary(标题), description(描述,可选), due(截止日期ISO8601,可选)
-  - "帮我建个任务 XXX"、"记一下 XXX" → task_create
+- task_create: 创建任务 → params: summary(标题), description(描述,可选), due(截止日期ISO8601,可选), assignee(负责人open_id,可选)
+  - "帮我建个任务 XXX"、"记一下 XXX"、"给XX建个任务" → task_create
 - task_list: 查看待办任务 → params: query(搜索关键词,可选)
   - "我的待办"、"有什么任务" → task_list
 - task_complete: 完成任务 → params: task_id
@@ -153,8 +153,8 @@ def _chat_prompt():
   - "帮我看看XX提了什么"、"分析一下XX" → digest，query填原始问题
 - daily_report: 查看今日工作日报 → params: {{}}
   - "日报"、"今天工作怎么样"、"今天有什么" → daily_report
-- task_create: 创建任务 → params: summary(标题), description(描述,可选), due(截止日期ISO8601,可选)
-  - "帮我建个任务 XXX"、"记一下 XXX" → task_create
+- task_create: 创建任务 → params: summary(标题), description(描述,可选), due(截止日期ISO8601,可选), assignee(负责人open_id,可选)
+  - "帮我建个任务 XXX"、"记一下 XXX"、"给XX建个任务" → task_create
 - task_list: 查看待办任务 → params: query(搜索关键词,可选)
   - "我的待办"、"有什么任务" → task_list
 - task_complete: 完成任务 → params: task_id
@@ -573,8 +573,32 @@ def do_meeting(params, chat_id, sender_id=""):
         args += ["--attendee-ids", ",".join(attendees)]
     result = lark_cmd(args)
     ok = result and result.get("ok")
-    if ok and chat_id:
-        reply_in_chat(chat_id, f"会议已创建~ {summary} {start[11:16]}-{end[11:16]}")
+    if ok:
+        # Build meeting card
+        time_str = f"{start[5:16]} ~ {end[11:16]}"
+        attendee_names = []
+        for aid in attendees:
+            name = _get_user_name(aid)
+            if name:
+                attendee_names.append(name)
+        card_content = (
+            f"📅 **会议已创建**\n\n"
+            f"**{summary}**\n\n"
+            f"🕐 {time_str}\n"
+        )
+        if attendee_names:
+            card_content += f"👥 参会人：{'、'.join(attendee_names)}\n"
+        card = json.dumps({"elements": [{"tag": "markdown", "content": card_content}]})
+
+        # Send card to the chat where it was requested
+        if chat_id:
+            _send_card(chat_id, card)
+
+        # DM each attendee (except the sender)
+        for aid in attendees:
+            if aid != sender_id:
+                _send_card_to_user(aid, card)
+        log(f"Meeting card sent to chat + {len(attendees)} attendees")
     elif not ok and chat_id:
         reply_in_chat(chat_id, "会议创建失败了，可能是权限问题")
     log(f"Meeting {'ok' if ok else 'failed'}: {summary}")
@@ -630,7 +654,46 @@ def do_search_user(params, chat_id):
     return True
 
 
-def do_task_create(params, chat_id):
+def _build_task_card(summary, description="", due="", task_id="", assignee_name=""):
+    lines = [f"📋 **任务已创建**\n\n**{summary}**"]
+    if description:
+        lines.append(f"\n{description}")
+    if due:
+        # Format due date for display
+        try:
+            dt = datetime.fromisoformat(due)
+            lines.append(f"\n⏰ 截止：{dt.strftime('%m月%d日 %H:%M')}")
+        except ValueError:
+            lines.append(f"\n⏰ 截止：{due}")
+    if assignee_name:
+        lines.append(f"\n👤 负责人：{assignee_name}")
+    if task_id:
+        lines.append(f"\n🔗 任务 ID：{task_id}")
+    content = "".join(lines)
+    return json.dumps({"elements": [{"tag": "markdown", "content": content}]})
+
+
+def _send_card(chat_id, card):
+    result = lark_cmd([
+        "im", "+messages-send", "--as", "bot",
+        "--chat-id", chat_id,
+        "--msg-type", "interactive",
+        "--content", card,
+    ])
+    return result and result.get("ok")
+
+
+def _send_card_to_user(user_id, card):
+    result = lark_cmd([
+        "im", "+messages-send", "--as", "bot",
+        "--user-id", user_id,
+        "--msg-type", "interactive",
+        "--content", card,
+    ])
+    return result and result.get("ok")
+
+
+def do_task_create(params, chat_id, sender_id=""):
     summary = params.get("summary", "")
     if not summary:
         if chat_id: reply_in_chat(chat_id, "任务标题不能为空")
@@ -642,12 +705,30 @@ def do_task_create(params, chat_id):
     due = params.get("due", "")
     if due:
         args += ["--due", due]
+    assignee = params.get("assignee", "")
+    if assignee:
+        args += ["--assignee", assignee]
     result = lark_cmd(args)
     if result and result.get("ok"):
         task_data = result.get("data", {}).get("task", {})
         task_id = task_data.get("id", "")
+
+        # Look up assignee name if we have an ID
+        assignee_name = ""
+        if assignee:
+            assignee_name = _get_user_name(assignee) or assignee
+
+        card = _build_task_card(summary, desc, due, task_id, assignee_name)
+
+        # Send card to the chat where it was requested
         if chat_id:
-            reply_in_chat(chat_id, f"任务已创建：{summary}" + (f"\n截止：{due}" if due else ""))
+            _send_card(chat_id, card)
+
+        # Also DM the assignee if it's someone else
+        if assignee and assignee != sender_id:
+            _send_card_to_user(assignee, card)
+            log(f"Task card sent to assignee: {assignee}")
+
         log(f"Task created: {task_id} {summary}")
         return True
     if chat_id: reply_in_chat(chat_id, "任务创建失败")
@@ -1325,7 +1406,7 @@ def execute_action(action, params, chat_id, sender_id="", chat_type="group"):
         send_daily_report()
         return True
     elif action == "task_create":
-        return do_task_create(params, chat_id)
+        return do_task_create(params, chat_id, sender_id)
     elif action == "task_list":
         return do_task_list(params, chat_id)
     elif action == "task_complete":
