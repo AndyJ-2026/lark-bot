@@ -1675,11 +1675,13 @@ def _start_lark_ws():
             pass
 
     # --force: override stale lock from previous instance
+    # lark-cli requires relative --output-dir, so cwd must be BOT_DIR
     _ws_process = subprocess.Popen(
         ["lark-cli", "event", "+subscribe", "--as", "bot",
          "--event-types", "im.message.receive_v1",
          "--compact", "--quiet", "--force",
-         "--output-dir", EVENT_DIR],
+         "--output-dir", "./events"],
+        cwd=BOT_DIR,
         stdout=subprocess.DEVNULL,
         stderr=open(os.path.join(BOT_DIR, "lark-ws.err"), "w"),
     )
