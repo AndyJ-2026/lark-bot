@@ -1,7 +1,7 @@
 FROM node:20-slim
 
 RUN apt-get update && \
-    apt-get install -y python3 python3-pip git && \
+    apt-get install -y python3 python3-pip git curl dbus gnome-keyring libsecret-1-0 && \
     rm -rf /var/lib/apt/lists/* && \
     npm install -g @larksuite/cli@latest
 

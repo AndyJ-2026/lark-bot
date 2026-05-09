@@ -3,8 +3,12 @@ set -e
 
 echo "=== Lark Bot Cloud Start ==="
 
-# Configure lark-cli
-echo "$LARK_APP_SECRET" | lark-cli config init \
+# Start dbus + unlock gnome-keyring (needed by lark-cli to store secrets)
+export $(dbus-launch)
+echo "" | gnome-keyring-daemon --unlock --components=secrets 2>/dev/null || true
+
+# Configure lark-cli via stdin
+printf '%s' "$LARK_APP_SECRET" | lark-cli config init \
   --app-id "$LARK_APP_ID" \
   --app-secret-stdin \
   --brand "${LARK_BRAND:-lark}"

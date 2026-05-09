@@ -1,0 +1,12 @@
+app = 'jaker-lark-bot'
+primary_region = 'hkg'
+
+[build]
+  dockerfile = 'Dockerfile'
+
+[env]
+  EVENT_DIR = '/app/events'
+
+[[vm]]
+  size = 'shared-cpu-1x'
+  memory = '256mb'
