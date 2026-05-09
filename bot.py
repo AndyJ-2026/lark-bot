@@ -1097,13 +1097,17 @@ def _transcribe_pipeline(audio_file, duration_sec, chat_id, card_msg_id):
         if not minutes_md:
             minutes_md = f"# 会议转写 {date_str}\n\n{transcript}"
 
-        notes_dir = os.path.join(VAULT_DIR, NOTES_FOLDER)
-        os.makedirs(notes_dir, exist_ok=True)
-        ts = time.strftime("%Y%m%d_%H%M%S")
-        note_file = os.path.join(notes_dir, f"{date_str} 会议纪要_{ts}.md")
-        with open(note_file, "w", encoding="utf-8") as f:
-            f.write(minutes_md)
-        log(f"Minutes saved to Obsidian: {note_file}")
+        # Save to Obsidian (optional — skip if vault directory doesn't exist)
+        if os.path.isdir(VAULT_DIR):
+            notes_dir = os.path.join(VAULT_DIR, NOTES_FOLDER)
+            os.makedirs(notes_dir, exist_ok=True)
+            ts = time.strftime("%Y%m%d_%H%M%S")
+            note_file = os.path.join(notes_dir, f"{date_str} 会议纪要_{ts}.md")
+            with open(note_file, "w", encoding="utf-8") as f:
+                f.write(minutes_md)
+            log(f"Minutes saved to Obsidian: {note_file}")
+        else:
+            log(f"Obsidian vault not found at {VAULT_DIR}, skipping local save")
 
         doc_title = f"{date_str} 会议纪要"
         doc_result = lark_cmd([
