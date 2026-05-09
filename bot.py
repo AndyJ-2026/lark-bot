@@ -110,8 +110,17 @@ def _reply_prompt():
   - "下午3点提醒我开会" → time: 今天15:00的ISO8601, message: "开会"
 - daily_report: 查看今日工作日报 → params: {{}}
   - "日报"、"今天工作怎么样" → daily_report
+- task_create: 创建任务 → params: summary(标题), description(描述,可选), due(截止日期ISO8601,可选)
+  - "帮我建个任务 XXX"、"记一下 XXX" → task_create
+- task_list: 查看待办任务 → params: query(搜索关键词,可选)
+  - "我的待办"、"有什么任务" → task_list
+- task_complete: 完成任务 → params: task_id
+- check_calendar: 查看日程 → params: start(ISO8601,可选), end(ISO8601,可选)
+  - "明天有什么会"、"下周三有空吗"、"看看日程" → check_calendar
+- read_doc: 读取飞书文档 → params: doc(文档链接或token)
+  - 用户发送飞书文档链接或 ID → read_doc
 - transcribe_start: 开始会议转写/录音 → params: {{}}
-  - "帮我转写"、"开始录音"、"转写会议" → transcribe_start
+  - "帮我转写"、"开始录音" → transcribe_start
 - transcribe_stop: 停止转写/录音并生成纪要 → params: {{}}
   - "结束转写"、"停止录音"、"结束" → transcribe_stop
 - none: 不需要操作
@@ -126,7 +135,7 @@ def _reply_prompt():
 当前时间：__NOW__
 
 JSON 输出（只输出 JSON）：
-{{"reply": "纯文本回复", "action": "meeting/cancel_meeting/search_user/digest/daily_report/remind/transcribe_start/transcribe_stop/none", "params": {{}}}}"""
+{{"reply": "纯文本回复", "action": "meeting/cancel_meeting/search_user/digest/daily_report/task_create/task_list/task_complete/check_calendar/read_doc/remind/transcribe_start/transcribe_stop/none", "params": {{}}}}"""
 
 
 def _chat_prompt():
@@ -144,9 +153,18 @@ def _chat_prompt():
   - "帮我看看XX提了什么"、"分析一下XX" → digest，query填原始问题
 - daily_report: 查看今日工作日报 → params: {{}}
   - "日报"、"今天工作怎么样"、"今天有什么" → daily_report
+- task_create: 创建任务 → params: summary(标题), description(描述,可选), due(截止日期ISO8601,可选)
+  - "帮我建个任务 XXX"、"记一下 XXX" → task_create
+- task_list: 查看待办任务 → params: query(搜索关键词,可选)
+  - "我的待办"、"有什么任务" → task_list
+- task_complete: 完成任务 → params: task_id
+- check_calendar: 查看日程 → params: start(ISO8601,可选), end(ISO8601,可选)
+  - "明天有什么会"、"下周三有空吗"、"看看日程" → check_calendar
+- read_doc: 读取飞书文档 → params: doc(文档链接或token)
+  - 用户发送飞书文档链接或 ID → read_doc
 - remind: 设置提醒 → params: time(ISO8601+08:00), message(提醒内容)
 - transcribe_start: 开始会议转写/录音 → params: {{}}
-  - "帮我转写"、"开始录音"、"转写会议" → transcribe_start
+  - "帮我转写"、"开始录音" → transcribe_start
 - transcribe_stop: 停止转写/录音并生成纪要 → params: {{}}
   - "结束转写"、"停止录音"、"结束" → transcribe_stop
 - none: 不需要操作
@@ -154,7 +172,7 @@ def _chat_prompt():
 当前时间：__NOW__
 
 JSON 输出：
-{{"reply": "纯文本回复", "action": "meeting/cancel_meeting/search_user/digest/daily_report/remind/transcribe_start/transcribe_stop/none", "params": {{}}}}"""
+{{"reply": "纯文本回复", "action": "meeting/cancel_meeting/search_user/digest/daily_report/task_create/task_list/task_complete/check_calendar/read_doc/remind/transcribe_start/transcribe_stop/none", "params": {{}}}}"""
 
 
 def _report_prompt():
@@ -610,6 +628,120 @@ def do_search_user(params, chat_id):
         else:
             reply_in_chat(chat_id, f"没找到「{query}」")
     return True
+
+
+def do_task_create(params, chat_id):
+    summary = params.get("summary", "")
+    if not summary:
+        if chat_id: reply_in_chat(chat_id, "任务标题不能为空")
+        return False
+    args = ["task", "+create", "--summary", summary]
+    desc = params.get("description", "")
+    if desc:
+        args += ["--description", desc]
+    due = params.get("due", "")
+    if due:
+        args += ["--due", due]
+    result = lark_cmd(args)
+    if result and result.get("ok"):
+        task_data = result.get("data", {}).get("task", {})
+        task_id = task_data.get("id", "")
+        if chat_id:
+            reply_in_chat(chat_id, f"任务已创建：{summary}" + (f"\n截止：{due}" if due else ""))
+        log(f"Task created: {task_id} {summary}")
+        return True
+    if chat_id: reply_in_chat(chat_id, "任务创建失败")
+    return False
+
+
+def do_task_list(params, chat_id):
+    args = ["task", "+get-my-tasks"]
+    query = params.get("query", "")
+    if query:
+        args += ["--query", query]
+    result = lark_cmd(args)
+    if result and result.get("ok"):
+        tasks = result.get("data", {}).get("items", [])
+        if not tasks:
+            if chat_id: reply_in_chat(chat_id, "没有待办任务，清净~")
+            return True
+        lines = ["你的待办："]
+        for t in tasks[:10]:
+            summary = t.get("summary", "无标题")
+            due = t.get("due", {})
+            due_str = ""
+            if due and due.get("date"):
+                due_str = f" (截止 {due['date']})"
+            lines.append(f"- {summary}{due_str}")
+        if len(tasks) > 10:
+            lines.append(f"...还有 {len(tasks) - 10} 个")
+        if chat_id: reply_in_chat(chat_id, "\n".join(lines))
+        return True
+    if chat_id: reply_in_chat(chat_id, "获取任务列表失败")
+    return False
+
+
+def do_task_complete(params, chat_id):
+    task_id = params.get("task_id", "")
+    if not task_id:
+        if chat_id: reply_in_chat(chat_id, "需要任务 ID 才能完成任务")
+        return False
+    result = lark_cmd(["task", "+complete", "--task-id", task_id])
+    if result and result.get("ok"):
+        if chat_id: reply_in_chat(chat_id, "任务已完成!")
+        return True
+    if chat_id: reply_in_chat(chat_id, "完成任务失败")
+    return False
+
+
+def do_check_calendar(params, chat_id):
+    start = params.get("start", "")
+    end = params.get("end", "")
+    args = ["calendar", "+agenda"]
+    if start:
+        args += ["--start", start]
+    if end:
+        args += ["--end", end]
+    result = lark_cmd(args)
+    if result and result.get("ok"):
+        events = result.get("data", [])
+        if not events:
+            if chat_id: reply_in_chat(chat_id, "那段时间没有日程，空的")
+            return True
+        lines = []
+        for e in events:
+            s = e.get("start_time", {}).get("datetime", "?")
+            end_t = e.get("end_time", {}).get("datetime", "?")
+            summary = e.get("summary", "无标题")
+            lines.append(f"- {s[5:16]}~{end_t[11:16]} {summary}")
+        if chat_id: reply_in_chat(chat_id, "\n".join(lines))
+        return True
+    if chat_id: reply_in_chat(chat_id, "日程获取失败")
+    return False
+
+
+def do_read_doc(params, chat_id):
+    doc = params.get("doc", "")
+    if not doc:
+        if chat_id: reply_in_chat(chat_id, "请发送文档链接或 ID")
+        return False
+    result = lark_cmd(["docs", "+fetch", "--doc", doc])
+    if result and result.get("ok"):
+        content = result.get("data", {}).get("content", "")
+        if not content:
+            content = json.dumps(result.get("data", {}), ensure_ascii=False)
+        # Summarize if too long
+        if len(content) > 2000:
+            summary = call_ai("你是文档摘要助手。用纯文本简要概括以下文档内容，保留关键信息。", content[:8000])
+            if summary and chat_id:
+                reply_in_chat(chat_id, f"文档概要：\n\n{summary}")
+            elif chat_id:
+                reply_in_chat(chat_id, content[:2000] + "\n\n...（内容过长，已截断）")
+        elif chat_id:
+            reply_in_chat(chat_id, content)
+        return True
+    if chat_id: reply_in_chat(chat_id, "文档读取失败，检查一下链接或 ID？")
+    return False
 
 
 def _pull_chat_messages(chat_id, since):
@@ -1192,6 +1324,16 @@ def execute_action(action, params, chat_id, sender_id="", chat_type="group"):
     elif action == "daily_report":
         send_daily_report()
         return True
+    elif action == "task_create":
+        return do_task_create(params, chat_id)
+    elif action == "task_list":
+        return do_task_list(params, chat_id)
+    elif action == "task_complete":
+        return do_task_complete(params, chat_id)
+    elif action == "check_calendar":
+        return do_check_calendar(params, chat_id)
+    elif action == "read_doc":
+        return do_read_doc(params, chat_id)
     elif action == "transcribe_start":
         return do_transcribe_start(chat_id)
     elif action == "transcribe_stop":
