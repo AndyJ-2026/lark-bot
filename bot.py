@@ -41,6 +41,25 @@ VAULT_DIR = os.environ.get("MEETING_VAULT", os.path.expanduser("~/Documents/Obsi
 NOTES_FOLDER = os.environ.get("MEETING_NOTES_FOLDER", "会议纪要")
 TMPDIR_MEETING = os.path.join(os.environ.get("TMPDIR", "/tmp"), "meeting-cli")
 
+# Bot's own open_id (to filter out self-messages)
+_BOT_OPEN_ID = None
+
+
+def _init_bot_open_id():
+    global _BOT_OPEN_ID
+    try:
+        result = subprocess.run(
+            ["lark-cli", "api", "GET", "/open-apis/bot/v3/info", "--as", "bot"],
+            capture_output=True, text=True, timeout=10)
+        if result.returncode == 0:
+            data = json.loads(result.stdout)
+            _BOT_OPEN_ID = data.get("bot", {}).get("open_id", "")
+            if _BOT_OPEN_ID:
+                return
+    except Exception:
+        pass
+    _BOT_OPEN_ID = ""
+
 
 # ============================================================
 # Config
@@ -1480,14 +1499,13 @@ def process_event(event):
             return
 
     sender_id = event.get("sender_id", "unknown")
-    sender_type = event.get("sender_type", "")
     raw_content = event.get("content") or ""
     chat_id = event.get("chat_id") or ""
     chat_type = event.get("chat_type") or "group"
     msg_type = event.get("message_type") or ""
 
     # Ignore bot's own messages
-    if sender_type == "app":
+    if sender_id == _BOT_OPEN_ID:
         return
 
     if msg_type and msg_type != "text":
@@ -1801,6 +1819,10 @@ def main():
     else:
         log("No config.json — waiting for first message to start setup")
     log("Actions: meeting, cancel_meeting, search_user, digest, remind, transcribe")
+
+    # Get bot's own open_id (for filtering self-messages)
+    _init_bot_open_id()
+    log(f"Bot open_id: {_BOT_OPEN_ID}")
 
     # Start lark-cli subscriber (bot manages it directly)
     _start_lark_ws()
