@@ -1635,9 +1635,12 @@ def process_event(event):
         log(f"1v1 from {sender_id[:16]}: {text[:80]}")
         history = _get_chat_history(sender_id)
         raw = call_ai(_chat_prompt(), text, history=history)
+        log(f"AI raw: {(raw or '')[:200]}")
         result = parse_ai(raw)
         reply_text = result.get("reply", "")
         action = result.get("action", "none")
+        if action != "none":
+            log(f"Action: {action}, params: {result.get('params', {})}")
 
         # Owner-only actions (involve owner's private data)
         OWNER_ONLY_ACTIONS = {"digest", "daily_report"}
