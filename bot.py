@@ -1632,6 +1632,17 @@ def process_event(event):
                 reply_in_chat(chat_id, "我还没有加入任何群，把我拉进群就行~")
             return
 
+        # Transcribe keywords — bypass AI to avoid JSON parsing failures
+        text_lower = text.strip().lower()
+        if any(kw in text_lower for kw in ["结束转写", "停止录音", "停止转写"]):
+            reply_in_chat(chat_id, "好的，正在结束转写...")
+            do_transcribe_stop(chat_id)
+            return
+        if any(kw in text_lower for kw in ["帮我转写", "开始录音", "开始转写", "转写会议"]):
+            reply_in_chat(chat_id, "好的，开始录音~")
+            do_transcribe_start(chat_id)
+            return
+
         log(f"1v1 from {sender_id[:16]}: {text[:80]}")
         history = _get_chat_history(sender_id)
         raw = call_ai(_chat_prompt(), text, history=history)
