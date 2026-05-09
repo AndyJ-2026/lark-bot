@@ -705,7 +705,7 @@ def do_task_create(params, chat_id, sender_id=""):
     due = params.get("due", "")
     if due:
         args += ["--due", due]
-    assignee = params.get("assignee", "")
+    assignee = params.get("assignee", "") or sender_id or OWNER_OPEN_ID
     if assignee:
         args += ["--assignee", assignee]
     result = lark_cmd(args)
