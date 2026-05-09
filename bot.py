@@ -724,13 +724,9 @@ def do_task_create(params, chat_id, sender_id=""):
         card = _build_task_card(summary, desc, due, task_id, assignee_name)
 
         # Send card to the chat where it was requested
+        # (assignee gets notified automatically by Lark's built-in Task Assistant)
         if chat_id:
             _send_card(chat_id, card)
-
-        # Also DM the assignee if it's someone else
-        if assignee and assignee != sender_id:
-            _send_card_to_user(assignee, card)
-            log(f"Task card sent to assignee: {assignee}")
 
         log(f"Task created: {task_id} {summary}")
         return True
@@ -1486,8 +1482,6 @@ def process_event(event):
 
     # --- 1v1 direct chat ---
     if chat_type == "p2p":
-        if not is_owner:
-            return
         text = extract_text(raw_content) if is_bot_mentioned(raw_content) else raw_content
         if not text.strip():
             return
@@ -1502,8 +1496,11 @@ def process_event(event):
             send_welcome_card(chat_id)
             return
 
-        # Chat list query
+        # Chat list query (owner only)
         if any(kw in text for kw in CHAT_LIST_KEYWORDS):
+            if not is_owner:
+                reply_in_chat(chat_id, "这个功能只有管理员能用哦")
+                return
             chats = _get_bot_chats()
             if chats:
                 reply_in_chat(chat_id, "我加入了这些群：\n" + "\n".join(f"• {name}" for name in chats))
@@ -1511,16 +1508,23 @@ def process_event(event):
                 reply_in_chat(chat_id, "我还没有加入任何群，把我拉进群就行~")
             return
 
-        log(f"1v1: {text[:80]}")
+        log(f"1v1 from {sender_id[:16]}: {text[:80]}")
         history = _get_chat_history(sender_id)
         raw = call_ai(_chat_prompt(), text, history=history)
         result = parse_ai(raw)
         reply_text = result.get("reply", "")
+        action = result.get("action", "none")
+
+        # Owner-only actions (involve owner's private data)
+        OWNER_ONLY_ACTIONS = {"digest", "daily_report"}
+        if action in OWNER_ONLY_ACTIONS and not is_owner:
+            reply_in_chat(chat_id, "这个功能只有管理员能用哦，你可以试试：建任务、约会议、查日程、查人~")
+            return
+
         # Save conversation to history
         _append_chat_history(sender_id, "user", text)
         _append_chat_history(sender_id, "assistant", reply_text)
         reply_in_chat(chat_id, reply_text)
-        action = result.get("action", "none")
         if action != "none":
             execute_action(action, result.get("params", {}), chat_id, sender_id, chat_type="p2p")
         return
