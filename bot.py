@@ -731,6 +731,27 @@ def do_task_create(params, chat_id, sender_id=""):
     if not summary:
         if chat_id: reply_in_chat(chat_id, "任务标题不能为空")
         return False
+
+    is_owner = sender_id == OWNER_OPEN_ID
+
+    # Non-owner can only create tasks that involve the owner
+    # (this bot is the owner's assistant, not a generic task tool)
+    if not is_owner:
+        # Check if they're trying to assign to themselves only
+        assignee_param = params.get("assignee", "")
+        if assignee_param == sender_id or not assignee_param:
+            if chat_id:
+                reply_in_chat(chat_id, f"你可以给 {OWNER_NAME} 布置任务，但不能给自己建哦~\n试试：\"帮我给 {OWNER_NAME} 建个任务 XXX\"")
+            return False
+
+    # Build members list
+    members = []
+    # Owner is always an assignee
+    members.append({"id": OWNER_OPEN_ID, "role": "assignee", "type": "user"})
+    # If a non-owner creates the task, they're also an assignee
+    if not is_owner and sender_id and sender_id != OWNER_OPEN_ID:
+        members.append({"id": sender_id, "role": "assignee", "type": "user"})
+
     args = ["task", "+create", "--as", "bot", "--summary", summary]
     desc = params.get("description", "")
     if desc:
@@ -738,32 +759,32 @@ def do_task_create(params, chat_id, sender_id=""):
     due = params.get("due", "")
     if due:
         args += ["--due", due]
-    assignee = params.get("assignee", "") or sender_id or OWNER_OPEN_ID
-    if assignee:
-        args += ["--assignee", assignee]
-    log(f"Task create args: {args}")
+    args += ["--data", json.dumps({"members": members})]
+
+    log(f"Task create: {summary}, members: {[m['id'][:16] for m in members]}")
     result = lark_cmd(args)
-    log(f"Task create result: {result}")
     if result and result.get("ok"):
         task_data = result.get("data", {})
         task_id = task_data.get("guid", "") or task_data.get("id", "")
 
-        # Look up assignee name
-        assignee_name = ""
-        if assignee == OWNER_OPEN_ID:
-            assignee_name = OWNER_NAME
-        elif assignee:
-            assignee_name = _get_user_name(assignee) or ""
+        # Build assignee display names
+        names = [OWNER_NAME]
+        if not is_owner and sender_id:
+            sender_name = _get_user_name(sender_id) or ""
+            if sender_name:
+                names.append(sender_name)
+        assignee_name = "、".join(names)
 
         card = _build_task_card(summary, desc, due, task_id, assignee_name)
 
         # Send card to the chat where it was requested
-        # (assignee gets notified automatically by Lark's built-in Task Assistant)
+        # (assignees get notified automatically by Lark's built-in Task Assistant)
         if chat_id:
             _send_card(chat_id, card)
 
         log(f"Task created: {task_id} {summary}")
         return True
+    log(f"Task create failed: {result}")
     if chat_id: reply_in_chat(chat_id, "任务创建失败")
     return False
 
