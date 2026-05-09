@@ -632,7 +632,7 @@ def do_meeting(params, chat_id, sender_id=""):
         end = (dt_start + timedelta(hours=hours, minutes=mins)).isoformat()
     except Exception:
         end = start
-    args = ["calendar", "+create", "--as", "bot", "--summary", summary, "--start", start, "--end", end]
+    args = ["calendar", "+create", "--summary", summary, "--start", start, "--end", end]
     attendees = list(params.get("attendees", []))
     # Resolve people names to open_ids
     for uid, _ in _resolve_people(params.get("people", [])):
