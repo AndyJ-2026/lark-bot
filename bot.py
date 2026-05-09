@@ -722,15 +722,19 @@ def do_task_create(params, chat_id, sender_id=""):
     assignee = params.get("assignee", "") or sender_id or OWNER_OPEN_ID
     if assignee:
         args += ["--assignee", assignee]
+    log(f"Task create args: {args}")
     result = lark_cmd(args)
+    log(f"Task create result: {result}")
     if result and result.get("ok"):
-        task_data = result.get("data", {}).get("task", {})
-        task_id = task_data.get("id", "")
+        task_data = result.get("data", {})
+        task_id = task_data.get("guid", "") or task_data.get("id", "")
 
-        # Look up assignee name if we have an ID
+        # Look up assignee name
         assignee_name = ""
-        if assignee:
-            assignee_name = _get_user_name(assignee) or assignee
+        if assignee == OWNER_OPEN_ID:
+            assignee_name = OWNER_NAME
+        elif assignee:
+            assignee_name = _get_user_name(assignee) or ""
 
         card = _build_task_card(summary, desc, due, task_id, assignee_name)
 
@@ -1476,10 +1480,15 @@ def process_event(event):
             return
 
     sender_id = event.get("sender_id", "unknown")
+    sender_type = event.get("sender_type", "")
     raw_content = event.get("content") or ""
     chat_id = event.get("chat_id") or ""
     chat_type = event.get("chat_type") or "group"
     msg_type = event.get("message_type") or ""
+
+    # Ignore bot's own messages
+    if sender_type == "app":
+        return
 
     if msg_type and msg_type != "text":
         return
