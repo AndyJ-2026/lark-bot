@@ -108,6 +108,8 @@ def _reply_prompt():
 - remind: 设置提醒 → params: time(ISO8601+08:00), message(提醒内容)
   - "明天中午提醒我写周报" → time: 明天12:00的ISO8601, message: "写周报"
   - "下午3点提醒我开会" → time: 今天15:00的ISO8601, message: "开会"
+- daily_report: 查看今日工作日报 → params: {{}}
+  - "日报"、"今天工作怎么样" → daily_report
 - transcribe_start: 开始会议转写/录音 → params: {{}}
   - "帮我转写"、"开始录音"、"转写会议" → transcribe_start
 - transcribe_stop: 停止转写/录音并生成纪要 → params: {{}}
@@ -124,21 +126,35 @@ def _reply_prompt():
 当前时间：__NOW__
 
 JSON 输出（只输出 JSON）：
-{{"reply": "纯文本回复", "action": "meeting/cancel_meeting/search_user/digest/remind/transcribe_start/transcribe_stop/none", "params": {{}}}}"""
+{{"reply": "纯文本回复", "action": "meeting/cancel_meeting/search_user/digest/daily_report/remind/transcribe_start/transcribe_stop/none", "params": {{}}}}"""
 
 
 def _chat_prompt():
     return f"""你是 {OWNER_NAME} 的私人 AI 助手"{BOT_NAME}"。1v1 聊天模式。
 - 聪明靠谱，语气轻松
-- 可以查日历、安排事项、查人、设提醒、会议转写、回答问题
 - 不用 markdown，纯文本
 - 约会议/设提醒时间用 ISO8601+08:00
-- "帮我转写"/"开始录音" → transcribe_start
-- "结束转写"/"停止录音"/"结束" → transcribe_stop
+
+你能执行的操作（通过 action 触发）：
+- meeting: 约会议 → params: summary, start(ISO8601+08:00), duration(如1h), attendees(open_id列表)
+- cancel_meeting: 取消会议 → params: keyword
+- search_user: 查找同事 → params: query
+- digest: 消息汇总或定向分析 → params: query(用户原始问题，通用汇总时留空), days(时间范围天数，默认7)
+  - "汇总一下"、"有什么消息"、"最近有什么" → digest，query留空
+  - "帮我看看XX提了什么"、"分析一下XX" → digest，query填原始问题
+- daily_report: 查看今日工作日报 → params: {{}}
+  - "日报"、"今天工作怎么样"、"今天有什么" → daily_report
+- remind: 设置提醒 → params: time(ISO8601+08:00), message(提醒内容)
+- transcribe_start: 开始会议转写/录音 → params: {{}}
+  - "帮我转写"、"开始录音"、"转写会议" → transcribe_start
+- transcribe_stop: 停止转写/录音并生成纪要 → params: {{}}
+  - "结束转写"、"停止录音"、"结束" → transcribe_stop
+- none: 不需要操作
+
 当前时间：__NOW__
 
 JSON 输出：
-{{"reply": "纯文本回复", "action": "meeting/cancel_meeting/search_user/digest/remind/transcribe_start/transcribe_stop/none", "params": {{}}}}"""
+{{"reply": "纯文本回复", "action": "meeting/cancel_meeting/search_user/digest/daily_report/remind/transcribe_start/transcribe_stop/none", "params": {{}}}}"""
 
 
 def _report_prompt():
@@ -1142,6 +1158,9 @@ def execute_action(action, params, chat_id, sender_id="", chat_type="group"):
         return do_digest(chat_id, params.get("query", ""), params.get("days", 0), chat_type)
     elif action == "remind":
         return do_remind(params, chat_id, sender_id)
+    elif action == "daily_report":
+        send_daily_report()
+        return True
     elif action == "transcribe_start":
         return do_transcribe_start(chat_id)
     elif action == "transcribe_stop":
