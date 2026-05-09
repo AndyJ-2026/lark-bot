@@ -731,7 +731,7 @@ def do_task_create(params, chat_id, sender_id=""):
     if not summary:
         if chat_id: reply_in_chat(chat_id, "任务标题不能为空")
         return False
-    args = ["task", "+create", "--summary", summary]
+    args = ["task", "+create", "--as", "bot", "--summary", summary]
     desc = params.get("description", "")
     if desc:
         args += ["--description", desc]
