@@ -1607,6 +1607,11 @@ def scheduler():
             check_reminders()
         except Exception as e:
             log(f"Reminder check error: {e}")
+        # Watchdog: check lark-cli health
+        try:
+            _check_ws_health()
+        except Exception as e:
+            log(f"WS health check error: {e}")
         time.sleep(30)
 
 
@@ -1638,6 +1643,71 @@ def watch_event_dir():
         time.sleep(1)
 
 
+# ============================================================
+# lark-cli WebSocket manager (auto-reconnect on network drop)
+# ============================================================
+
+_ws_process = None
+
+
+def _start_lark_ws():
+    """Start lark-cli event subscriber. Returns the process."""
+    global _ws_process
+    # Kill any existing subscriber
+    if _ws_process and _ws_process.poll() is None:
+        _ws_process.terminate()
+        try:
+            _ws_process.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            _ws_process.kill()
+
+    os.makedirs(EVENT_DIR, exist_ok=True)
+    # Clear stale event files
+    for f in glob.glob(os.path.join(EVENT_DIR, "*.json")):
+        try:
+            os.remove(f)
+        except OSError:
+            pass
+
+    _ws_process = subprocess.Popen(
+        ["lark-cli", "event", "+subscribe", "--as", "bot",
+         "--event-types", "im.message.receive_v1",
+         "--compact", "--quiet",
+         "--output-dir", EVENT_DIR],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    log(f"lark-cli subscriber started (PID: {_ws_process.pid})")
+    return _ws_process
+
+
+def _check_ws_health():
+    """Check if lark-cli is alive, restart if dead. Returns True if restarted."""
+    global _ws_process
+    if _ws_process is None or _ws_process.poll() is not None:
+        exit_code = _ws_process.returncode if _ws_process else "N/A"
+        log(f"lark-cli subscriber died (exit={exit_code}), restarting...")
+        _start_lark_ws()
+        # Notify owner that bot reconnected
+        if CONFIG:
+            time.sleep(3)  # give lark-cli a moment to connect
+            _send_online_card(reconnect=True)
+        return True
+    return False
+
+
+def _send_online_card(reconnect=False):
+    """Send a status card to owner."""
+    now = datetime.now().strftime("%H:%M")
+    if reconnect:
+        content = f"🔄 **{BOT_NAME} 已恢复连接**\n\n时间：{now}\n网络断开后自动重连成功"
+    else:
+        content = f"✅ **{BOT_NAME} 已上线**\n\n时间：{now}\n随时可以跟我说话~"
+    card = json.dumps({"elements": [{"tag": "markdown", "content": content}]})
+    if OWNER_OPEN_ID:
+        _send_card_to_user(OWNER_OPEN_ID, card)
+
+
 def main():
     mode = "setup" if not CONFIG else "normal"
     log(f"Lark Bot v8 starting (mode: {mode})")
@@ -1646,6 +1716,14 @@ def main():
     else:
         log("No config.json — waiting for first message to start setup")
     log("Actions: meeting, cancel_meeting, search_user, digest, remind, transcribe")
+
+    # Start lark-cli subscriber (bot manages it directly)
+    _start_lark_ws()
+    time.sleep(3)
+
+    # Send online notification
+    if CONFIG:
+        _send_online_card()
 
     t = threading.Thread(target=scheduler, daemon=True)
     t.start()

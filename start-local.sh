@@ -29,30 +29,12 @@ export LARK_APP_SECRET="${LARK_APP_SECRET}"
 export MINIMAX_API_KEY="${MINIMAX_API_KEY}"
 export EVENT_DIR="$SCRIPT_DIR/events"
 
-# Start event subscriber
-mkdir -p "$EVENT_DIR"
-lark-cli event +subscribe --as bot \
-  --event-types "im.message.receive_v1" \
-  --compact --quiet \
-  --output-dir ./events 2>/tmp/lark-ws.log &
-WS_PID=$!
-
-sleep 3
-
-# Verify subscriber is running
-if ! kill -0 $WS_PID 2>/dev/null; then
-    echo "错误: lark-cli 事件订阅启动失败"
-    exit 1
-fi
-
-echo "lark-cli 事件订阅已启动 (PID: $WS_PID)"
-
-# Start bot
+# Start bot (bot.py now manages lark-cli subscriber internally)
 python3 -u bot.py &
 BOT_PID=$!
 echo "bot.py 已启动 (PID: $BOT_PID)"
 
 # Cleanup on exit
-trap "kill $WS_PID $BOT_PID 2>/dev/null; echo '已停止'" EXIT INT TERM
+trap "kill $BOT_PID 2>/dev/null; pkill -f 'lark-cli.*event.*subscribe' 2>/dev/null; echo '已停止'" EXIT INT TERM
 
 wait $BOT_PID
