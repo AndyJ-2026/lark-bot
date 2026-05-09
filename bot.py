@@ -916,9 +916,9 @@ def do_read_doc(params, chat_id):
         return False
     result = lark_cmd(["docs", "+fetch", "--doc", doc])
     if result and result.get("ok"):
-        content = result.get("data", {}).get("content", "")
+        content = result.get("data", {}).get("markdown", "") or result.get("data", {}).get("content", "")
         if not content:
-            content = json.dumps(result.get("data", {}), ensure_ascii=False)
+            content = "文档内容为空"
         # Summarize if too long
         if len(content) > 2000:
             summary = call_ai("你是文档摘要助手。用纯文本简要概括以下文档内容，保留关键信息。", content[:8000])
