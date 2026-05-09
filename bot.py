@@ -239,20 +239,47 @@ def _owner_pattern():
 # AI
 # ============================================================
 
-def call_ai(system_prompt, user_msg):
+# ---- Chat history for context-aware 1v1 conversations ----
+_chat_history = {}  # sender_id → [{"role": ..., "content": ...}, ...]
+_CHAT_HISTORY_MAX = 10  # max messages per user (5 rounds)
+_CHAT_HISTORY_TTL = 3600  # expire after 1 hour of inactivity
+_chat_history_ts = {}  # sender_id → last activity timestamp
+
+
+def _get_chat_history(sender_id):
+    # Expire stale history
+    if sender_id in _chat_history_ts:
+        if time.time() - _chat_history_ts[sender_id] > _CHAT_HISTORY_TTL:
+            _chat_history.pop(sender_id, None)
+            _chat_history_ts.pop(sender_id, None)
+    return _chat_history.get(sender_id, [])
+
+
+def _append_chat_history(sender_id, role, content):
+    if sender_id not in _chat_history:
+        _chat_history[sender_id] = []
+    _chat_history[sender_id].append({"role": role, "content": content})
+    # Trim to max
+    if len(_chat_history[sender_id]) > _CHAT_HISTORY_MAX:
+        _chat_history[sender_id] = _chat_history[sender_id][-_CHAT_HISTORY_MAX:]
+    _chat_history_ts[sender_id] = time.time()
+
+
+def call_ai(system_prompt, user_msg, history=None):
     client = _get_llm_client()
     if not client:
         log("AI error: no LLM client configured")
         return None
     now = datetime.now().strftime("%Y-%m-%d %H:%M %A")
     prompt = system_prompt.replace("__NOW__", now)
+    messages = [{"role": "system", "content": prompt}]
+    if history:
+        messages.extend(history)
+    messages.append({"role": "user", "content": user_msg})
     try:
         resp = client.chat.completions.create(
             model=LLM_MODEL,
-            messages=[
-                {"role": "system", "content": prompt},
-                {"role": "user", "content": user_msg},
-            ],
+            messages=messages,
             temperature=0.5,
         )
         content = resp.choices[0].message.content.strip()
@@ -1259,8 +1286,14 @@ def process_event(event):
             return
 
         log(f"1v1: {text[:80]}")
-        result = parse_ai(call_ai(_chat_prompt(), text))
-        reply_in_chat(chat_id, result.get("reply", ""))
+        history = _get_chat_history(sender_id)
+        raw = call_ai(_chat_prompt(), text, history=history)
+        result = parse_ai(raw)
+        reply_text = result.get("reply", "")
+        # Save conversation to history
+        _append_chat_history(sender_id, "user", text)
+        _append_chat_history(sender_id, "assistant", raw or reply_text)
+        reply_in_chat(chat_id, reply_text)
         action = result.get("action", "none")
         if action != "none":
             execute_action(action, result.get("params", {}), chat_id, sender_id, chat_type="p2p")
