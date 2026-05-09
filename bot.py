@@ -338,16 +338,29 @@ def call_ai(system_prompt, user_msg, history=None):
         content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
         content = re.sub(r"<tool_code>.*?</tool_code>", "", content, flags=re.DOTALL).strip()
         # Handle MiniMax tool_call XML format → convert to JSON
-        tc_match = re.search(r"<minimax:tool_call>(.*?)</minimax:tool_call>", content, re.DOTALL)
+        # Matches both proper </minimax:tool_call> and malformed closing tags
+        tc_match = re.search(r"<minimax:tool_call>(.*?)(?:</minimax:tool_call>|$)", content, re.DOTALL)
         if tc_match:
-            tc_xml = tc_match.group(1)
-            action_match = re.search(r'<invoke\s+name="(\w+)"', tc_xml)
+            tc_content = tc_match.group(1)
+            # Try XML-style invoke
+            action_match = re.search(r'<invoke\s+name="(\w+)"', tc_content)
             if action_match:
                 action = action_match.group(1)
                 params = {}
-                for pm in re.finditer(r'<parameter\s+name="(\w+)">(.*?)</parameter>', tc_xml, re.DOTALL):
+                for pm in re.finditer(r'<parameter\s+name="(\w+)">(.*?)</parameter>', tc_content, re.DOTALL):
                     params[pm.group(1)] = pm.group(2).strip()
-                content = json.dumps({"reply": f"好的，正在处理~", "action": action, "params": params})
+                content = json.dumps({"reply": "好的，正在处理~", "action": action, "params": params})
+            else:
+                # Try JSON inside the tool_call tags
+                json_match = re.search(r'\{[^}]*"action"\s*:\s*"(\w+)"[^}]*\}', tc_content, re.DOTALL)
+                if json_match:
+                    try:
+                        parsed = json.loads(json_match.group(0))
+                        parsed.setdefault("reply", "好的，正在处理~")
+                        content = json.dumps(parsed)
+                    except json.JSONDecodeError:
+                        action = json_match.group(1)
+                        content = json.dumps({"reply": "好的，正在处理~", "action": action, "params": {}})
         if content.startswith("```"):
             content = content.split("\n", 1)[1].rsplit("```", 1)[0].strip()
         return content
@@ -1635,11 +1648,11 @@ def process_event(event):
 
         # Transcribe keywords — bypass AI to avoid JSON parsing failures
         text_lower = text.strip().lower()
-        if any(kw in text_lower for kw in ["结束转写", "停止录音", "停止转写"]):
+        if any(kw in text_lower for kw in ["结束转写", "停止录音", "停止转写", "结束录制", "停止录制", "结束录音"]):
             reply_in_chat(chat_id, "好的，正在结束转写...")
             do_transcribe_stop(chat_id)
             return
-        if any(kw in text_lower for kw in ["帮我转写", "开始录音", "开始转写", "转写会议"]):
+        if any(kw in text_lower for kw in ["帮我转写", "开始录音", "开始转写", "转写会议", "开始录制"]):
             reply_in_chat(chat_id, "好的，开始录音~")
             do_transcribe_start(chat_id)
             return
