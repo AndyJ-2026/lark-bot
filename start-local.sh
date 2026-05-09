@@ -15,7 +15,7 @@ fi
 # Kill any existing bot processes
 echo "检查残留进程..."
 pkill -9 -f "python.*bot\.py" 2>/dev/null
-pkill -9 -f "lark-cli.*event.*subscribe" 2>/dev/null
+pkill -9 -f "lark-cli.*subscribe" 2>/dev/null
 sleep 1
 
 # Clear stale event files

@@ -1674,13 +1674,14 @@ def _start_lark_ws():
         except OSError:
             pass
 
+    # --force: override stale lock from previous instance
     _ws_process = subprocess.Popen(
         ["lark-cli", "event", "+subscribe", "--as", "bot",
          "--event-types", "im.message.receive_v1",
-         "--compact", "--quiet",
+         "--compact", "--quiet", "--force",
          "--output-dir", EVENT_DIR],
         stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stderr=open(os.path.join(BOT_DIR, "lark-ws.err"), "w"),
     )
     _ws_last_restart = time.time()
     _ws_restart_count += 1
