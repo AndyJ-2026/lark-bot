@@ -766,21 +766,35 @@ _transcribe_state = {
     "card_msg_id": None,
 }
 
-ASR_ENGINE = "本地（SenseVoice）"
+ASR_ENGINE_LOCAL = "本地（SenseVoice）"
+ASR_ENGINE_API = "云端 API"
+
+def _asr_engine_label():
+    if CONFIG and CONFIG.get("asr_engine") == "api":
+        return ASR_ENGINE_API
+    return ASR_ENGINE_LOCAL
+
+# ASR onboarding state (first-time engine selection)
+_asr_onboard_state = {
+    "active": False,
+    "step": None,          # "choose_engine" / "wait_api_key" / "wait_api_url"
+    "pending_args": None,  # (audio_file, duration_sec, chat_id, card_msg_id)
+}
+
 
 
 def _build_transcribe_card(status, **kwargs):
     if status == "recording":
         start_time = kwargs.get("start_time", "")
-        content = f"🎙️ **正在录音中...**\n开始时间：{start_time}\n引擎：{ASR_ENGINE}\n\n💡 说「结束转写」即可停止并生成纪要"
+        content = f"🎙️ **正在录音中...**\n开始时间：{start_time}\n引擎：{_asr_engine_label()}\n\n💡 说「结束转写」即可停止并生成纪要"
     elif status == "transcribing":
         duration = kwargs.get("duration", "")
-        content = f"⏳ **转写中...**\n录音时长：{duration}\n引擎：{ASR_ENGINE}"
+        content = f"⏳ **转写中...**\n录音时长：{duration}\n引擎：{_asr_engine_label()}"
     elif status == "done":
         duration = kwargs.get("duration", "")
         summary = kwargs.get("summary", "会议纪要已生成")
         doc_url = kwargs.get("doc_url", "")
-        content = f"✅ **会议纪要已生成**\n时长：{duration} | 引擎：{ASR_ENGINE}\n\n{summary}"
+        content = f"✅ **会议纪要已生成**\n时长：{duration} | 引擎：{_asr_engine_label()}\n\n{summary}"
         if doc_url:
             content += f"\n\n[📄 查看完整纪要]({doc_url})"
     elif status == "error":
@@ -837,7 +851,7 @@ def do_transcribe_start(chat_id):
 
     try:
         proc = subprocess.Popen(
-            [AUDIO_CAPTURE_BIN],
+            [AUDIO_CAPTURE_BIN, "--auto"],
             stdout=open(audio_file, "wb"),
             stderr=subprocess.DEVNULL,
         )
@@ -887,6 +901,19 @@ def do_transcribe_stop(chat_id):
     duration_str = f"{int(duration_sec // 60)} 分钟"
     _update_transcribe_card(card_msg_id, "transcribing", duration=duration_str)
 
+    # First-time ASR engine selection onboarding
+    if CONFIG and not CONFIG.get("asr_engine"):
+        _asr_onboard_state["active"] = True
+        _asr_onboard_state["step"] = "choose_engine"
+        _asr_onboard_state["pending_args"] = (audio_file, duration_sec, chat_id, card_msg_id)
+        reply_in_chat(chat_id,
+            "录音已结束！在开始转写之前，请选择转写引擎：\n\n"
+            "1️⃣ 本地模型（SenseVoice）— 免费离线，但精度一般\n"
+            "2️⃣ 云端 API — 精度更高，需要配置 API Key\n\n"
+            "请回复 1 或 2：")
+        log("ASR onboarding: waiting for engine choice")
+        return True
+
     t = threading.Thread(
         target=_transcribe_pipeline,
         args=(audio_file, duration_sec, chat_id, card_msg_id),
@@ -897,31 +924,154 @@ def do_transcribe_stop(chat_id):
     return True
 
 
+def process_asr_onboard(event):
+    """Handle ASR engine selection during first transcription."""
+    chat_id = event.get("chat_id") or ""
+    text = (event.get("content") or "").strip()
+    step = _asr_onboard_state["step"]
+
+    if step == "choose_engine":
+        if text in ("1", "１"):
+            # Local SenseVoice
+            CONFIG["asr_engine"] = "local"
+            save_config(CONFIG)
+            _asr_onboard_state["active"] = False
+            _asr_onboard_state["step"] = None
+            reply_in_chat(chat_id, "已选择本地模型（SenseVoice），开始转写...")
+            _resume_transcribe_pipeline()
+        elif text in ("2", "２"):
+            _asr_onboard_state["step"] = "wait_api_key"
+            reply_in_chat(chat_id,
+                "请发送你的语音转写 API Key：\n"
+                "（支持 OpenAI Whisper 兼容接口，如 Groq、DeepInfra 等）")
+        else:
+            reply_in_chat(chat_id, "请回复 1（本地模型）或 2（云端 API）：")
+
+    elif step == "wait_api_key":
+        if not text or len(text) < 10:
+            reply_in_chat(chat_id, "这个不像是有效的 API Key，再检查一下？")
+            return
+        _asr_onboard_state["api_key"] = text
+        _asr_onboard_state["step"] = "wait_api_url"
+        reply_in_chat(chat_id,
+            "API Base URL 是什么？\n\n"
+            "1️⃣ OpenAI（https://api.openai.com/v1）\n"
+            "2️⃣ Groq（https://api.groq.com/openai/v1）\n"
+            "3️⃣ 自定义（直接发送 URL）\n\n"
+            "请回复 1、2 或完整 URL：")
+
+    elif step == "wait_api_url":
+        url_map = {
+            "1": "https://api.openai.com/v1",
+            "１": "https://api.openai.com/v1",
+            "2": "https://api.groq.com/openai/v1",
+            "２": "https://api.groq.com/openai/v1",
+        }
+        base_url = url_map.get(text, text if text.startswith("http") else None)
+        if not base_url:
+            reply_in_chat(chat_id, "请回复 1、2 或完整的 URL（以 http 开头）：")
+            return
+
+        CONFIG["asr_engine"] = "api"
+        CONFIG["asr_api_key"] = _asr_onboard_state.get("api_key", "")
+        CONFIG["asr_api_url"] = base_url
+        CONFIG["asr_model"] = "whisper-large-v3" if "groq" in base_url else "whisper-1"
+        save_config(CONFIG)
+        _asr_onboard_state["active"] = False
+        _asr_onboard_state["step"] = None
+        reply_in_chat(chat_id, f"已配置云端 API，开始转写...")
+        _resume_transcribe_pipeline()
+
+
+def _resume_transcribe_pipeline():
+    """Resume transcription after ASR onboarding completes."""
+    args = _asr_onboard_state.get("pending_args")
+    if not args:
+        return
+    _asr_onboard_state["pending_args"] = None
+    t = threading.Thread(target=_transcribe_pipeline, args=args, daemon=True)
+    t.start()
+    log("Transcribe pipeline resumed after ASR onboarding")
+
+
+def _transcribe_with_api(audio_file):
+    """Transcribe using cloud Whisper-compatible API."""
+    import wave
+    import struct
+
+    # Convert PCM to WAV in memory
+    wav_file = audio_file.replace(".pcm", ".wav")
+    with open(audio_file, "rb") as pcm:
+        pcm_data = pcm.read()
+    with wave.open(wav_file, "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)  # 16-bit
+        wav.setframerate(16000)
+        wav.writeframes(pcm_data)
+
+    api_key = CONFIG.get("asr_api_key", "")
+    base_url = CONFIG.get("asr_api_url", "https://api.openai.com/v1")
+    model = CONFIG.get("asr_model", "whisper-1")
+
+    import requests
+    with open(wav_file, "rb") as f:
+        resp = requests.post(
+            f"{base_url}/audio/transcriptions",
+            headers={"Authorization": f"Bearer {api_key}"},
+            files={"file": (os.path.basename(wav_file), f, "audio/wav")},
+            data={"model": model, "language": "zh"},
+            timeout=600,
+        )
+    try:
+        os.remove(wav_file)
+    except OSError:
+        pass
+
+    if resp.status_code != 200:
+        raise RuntimeError(f"ASR API error {resp.status_code}: {resp.text[:200]}")
+    return resp.json().get("text", "")
+
+
 def _transcribe_pipeline(audio_file, duration_sec, chat_id, card_msg_id):
     duration_str = f"{int(duration_sec // 60)} 分钟"
     try:
-        transcript_file = audio_file.replace(".pcm", ".txt")
-        log(f"Running SenseVoice on {audio_file}...")
-        transcribe_python = VENV_PYTHON if os.path.isfile(VENV_PYTHON) else sys.executable
-        result = subprocess.run(
-            [transcribe_python, TRANSCRIBE_SCRIPT, "--input", audio_file, "--output", transcript_file],
-            capture_output=True, text=True, timeout=1800,
-        )
-        if result.returncode != 0:
-            log(f"Transcribe failed: {result.stderr[:300]}")
-            _update_transcribe_card(card_msg_id, "error", error="转写失败，可能是音频太短或模型出错")
-            return
+        use_api = CONFIG and CONFIG.get("asr_engine") == "api"
 
-        if not os.path.isfile(transcript_file):
-            _update_transcribe_card(card_msg_id, "error", error="转写结果为空，可能会议中没有语音")
-            return
+        if use_api:
+            log(f"Running cloud ASR on {audio_file}...")
+            try:
+                transcript = _transcribe_with_api(audio_file)
+            except Exception as e:
+                log(f"Cloud ASR failed: {e}")
+                _update_transcribe_card(card_msg_id, "error", error=f"云端转写失败：{e}")
+                return
+            if not transcript or not transcript.strip():
+                _update_transcribe_card(card_msg_id, "error", error="转写结果为空，可能会议中没有语音")
+                return
+            transcript_file = audio_file.replace(".pcm", ".txt")
+        else:
+            transcript_file = audio_file.replace(".pcm", ".txt")
+            log(f"Running SenseVoice on {audio_file}...")
+            transcribe_python = VENV_PYTHON if os.path.isfile(VENV_PYTHON) else sys.executable
+            result = subprocess.run(
+                [transcribe_python, TRANSCRIBE_SCRIPT, "--input", audio_file, "--output", transcript_file],
+                capture_output=True, text=True, timeout=1800,
+            )
+            if result.returncode != 0:
+                log(f"Transcribe failed: {result.stderr[:300]}")
+                _update_transcribe_card(card_msg_id, "error", error="转写失败，可能是音频太短或模型出错")
+                return
 
-        with open(transcript_file, encoding="utf-8") as f:
-            transcript = f.read()
+            if not os.path.isfile(transcript_file):
+                _update_transcribe_card(card_msg_id, "error", error="转写结果为空，可能会议中没有语音")
+                return
 
-        if not transcript.strip():
-            _update_transcribe_card(card_msg_id, "error", error="转写结果为空")
-            return
+            with open(transcript_file, encoding="utf-8") as f:
+                transcript = f.read()
+
+            if not transcript.strip():
+                _update_transcribe_card(card_msg_id, "error", error="转写结果为空")
+                return
 
         log(f"Transcription done: {len(transcript)} chars")
 
@@ -1053,6 +1203,11 @@ def process_event(event):
 
     is_owner = sender_id == OWNER_OPEN_ID
 
+    # --- ASR engine onboarding (intercept during first transcription) ---
+    if _asr_onboard_state["active"] and chat_type == "p2p" and is_owner:
+        process_asr_onboard(event)
+        return
+
     # --- 1v1 direct chat ---
     if chat_type == "p2p":
         if not is_owner:
@@ -1163,11 +1318,11 @@ def scheduler():
     report_sent = False
     while True:
         now = datetime.now()
-        if now.hour == 20 and now.minute == 0 and not report_sent:
+        if now.hour == 20 and not report_sent:
             if CONFIG:  # only send if configured
                 send_daily_report()
             report_sent = True
-        elif now.hour == 0 and now.minute == 0:
+        elif now.hour != 20:
             report_sent = False
         try:
             check_reminders()
