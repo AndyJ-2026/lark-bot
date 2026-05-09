@@ -140,8 +140,9 @@ def _reply_prompt():
   - "下午3点提醒我开会" → time: 今天15:00的ISO8601, message: "开会"
 - daily_report: 查看今日工作日报 → params: {{}}
   - "日报"、"今天工作怎么样" → daily_report
-- task_create: 创建任务 → params: summary(标题), description(描述,可选), due(截止日期ISO8601,可选), assignee(负责人open_id,可选)
-  - "帮我建个任务 XXX"、"记一下 XXX"、"给XX建个任务" → task_create
+- task_create: 创建任务 → params: summary(标题), description(描述,可选), due(截止日期ISO8601,可选), people(涉及的人名列表,可选)
+  - "帮我建个任务 XXX"、"记一下 XXX"、"帮我和XX建个任务" → task_create
+  - 不需要先 search_user，直接把人名放 people 参数，系统会自动查找
 - task_list: 查看待办任务 → params: query(搜索关键词,可选)
   - "我的待办"、"有什么任务" → task_list
 - task_complete: 完成任务 → params: task_id
@@ -183,8 +184,9 @@ def _chat_prompt():
   - "帮我看看XX提了什么"、"分析一下XX" → digest，query填原始问题
 - daily_report: 查看今日工作日报 → params: {{}}
   - "日报"、"今天工作怎么样"、"今天有什么" → daily_report
-- task_create: 创建任务 → params: summary(标题), description(描述,可选), due(截止日期ISO8601,可选), assignee(负责人open_id,可选)
-  - "帮我建个任务 XXX"、"记一下 XXX"、"给XX建个任务" → task_create
+- task_create: 创建任务 → params: summary(标题), description(描述,可选), due(截止日期ISO8601,可选), people(涉及的人名列表,可选)
+  - "帮我建个任务 XXX"、"记一下 XXX"、"帮我和XX建个任务" → task_create
+  - 不需要先 search_user，直接把人名放 people 参数，系统会自动查找
 - task_list: 查看待办任务 → params: query(搜索关键词,可选)
   - "我的待办"、"有什么任务" → task_list
 - task_complete: 完成任务 → params: task_id
@@ -746,11 +748,30 @@ def do_task_create(params, chat_id, sender_id=""):
 
     # Build members list
     members = []
+    member_ids = set()
     # Owner is always an assignee
     members.append({"id": OWNER_OPEN_ID, "role": "assignee", "type": "user"})
+    member_ids.add(OWNER_OPEN_ID)
     # If a non-owner creates the task, they're also an assignee
-    if not is_owner and sender_id and sender_id != OWNER_OPEN_ID:
+    if not is_owner and sender_id and sender_id not in member_ids:
         members.append({"id": sender_id, "role": "assignee", "type": "user"})
+        member_ids.add(sender_id)
+    # Resolve people names to open_ids
+    people = params.get("people", [])
+    if isinstance(people, str):
+        people = [people]
+    for name in people:
+        if not name:
+            continue
+        result = lark_cmd(["contact", "+search-user", "--query", name])
+        if result and result.get("ok"):
+            users = result.get("data", {}).get("users", [])
+            if users:
+                uid = users[0].get("open_id", "")
+                if uid and uid not in member_ids:
+                    members.append({"id": uid, "role": "assignee", "type": "user"})
+                    member_ids.add(uid)
+                    log(f"Resolved '{name}' → {users[0].get('name', '')} ({uid[:16]})")
 
     args = ["task", "+create", "--as", "bot", "--summary", summary]
     desc = params.get("description", "")
@@ -768,11 +789,14 @@ def do_task_create(params, chat_id, sender_id=""):
         task_id = task_data.get("guid", "") or task_data.get("id", "")
 
         # Build assignee display names
-        names = [OWNER_NAME]
-        if not is_owner and sender_id:
-            sender_name = _get_user_name(sender_id) or ""
-            if sender_name:
-                names.append(sender_name)
+        names = []
+        for m in members:
+            mid = m["id"]
+            if mid == OWNER_OPEN_ID:
+                names.append(OWNER_NAME)
+            else:
+                n = _get_user_name(mid) or mid[:12]
+                names.append(n)
         assignee_name = "、".join(names)
 
         card = _build_task_card(summary, desc, due, task_id, assignee_name)
