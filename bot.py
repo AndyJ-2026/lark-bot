@@ -1648,11 +1648,16 @@ def watch_event_dir():
 # ============================================================
 
 _ws_process = None
+_ws_last_restart = 0      # timestamp of last restart
+_ws_restart_count = 0     # consecutive restarts without staying alive
+_WS_COOLDOWN = 60         # min seconds between restarts
+_WS_STABLE_TIME = 30      # process must live this long to count as "stable"
+_ws_notified = False       # whether we already sent a reconnect card this cycle
 
 
 def _start_lark_ws():
     """Start lark-cli event subscriber. Returns the process."""
-    global _ws_process
+    global _ws_process, _ws_last_restart, _ws_restart_count
     # Kill any existing subscriber
     if _ws_process and _ws_process.poll() is None:
         _ws_process.terminate()
@@ -1677,22 +1682,42 @@ def _start_lark_ws():
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
-    log(f"lark-cli subscriber started (PID: {_ws_process.pid})")
+    _ws_last_restart = time.time()
+    _ws_restart_count += 1
+    log(f"lark-cli subscriber started (PID: {_ws_process.pid}, attempt: {_ws_restart_count})")
     return _ws_process
 
 
 def _check_ws_health():
-    """Check if lark-cli is alive, restart if dead. Returns True if restarted."""
-    global _ws_process
+    """Check if lark-cli is alive, restart if dead with cooldown."""
+    global _ws_process, _ws_restart_count, _ws_notified
     if _ws_process is None or _ws_process.poll() is not None:
+        elapsed = time.time() - _ws_last_restart
+
+        # If process was stable (lived long enough), reset counter
+        if elapsed > _WS_STABLE_TIME:
+            _ws_restart_count = 0
+            _ws_notified = False
+
+        # Cooldown: don't restart too frequently
+        if elapsed < _WS_COOLDOWN:
+            return False
+
         exit_code = _ws_process.returncode if _ws_process else "N/A"
         log(f"lark-cli subscriber died (exit={exit_code}), restarting...")
         _start_lark_ws()
-        # Notify owner that bot reconnected
-        if CONFIG:
-            time.sleep(3)  # give lark-cli a moment to connect
-            _send_online_card(reconnect=True)
+
+        # Only send notification once per disconnect cycle, and only after confirming it stays alive
+        if CONFIG and not _ws_notified:
+            time.sleep(5)
+            if _ws_process and _ws_process.poll() is None:
+                _send_online_card(reconnect=True)
+                _ws_notified = True
         return True
+
+    # Process is alive — if it's been stable, reset counter
+    if time.time() - _ws_last_restart > _WS_STABLE_TIME and _ws_restart_count > 0:
+        _ws_restart_count = 0
     return False
 
 
