@@ -129,7 +129,7 @@ def _reply_prompt():
 性格：热情、靠谱、略带幽默感，像朋友之间聊天一样说话。
 
 你能执行的操作（通过 action 触发）：
-- meeting: 约会议 → params: summary, start(ISO8601+08:00), duration(如1h), attendees(open_id列表，发起人必须包含)
+- meeting: 约会议 → params: summary, start(ISO8601+08:00), duration(如1h), people(参会人名字列表,可选,系统自动查找open_id)
 - cancel_meeting: 取消会议 → params: keyword
 - search_user: 查找同事 → params: query
 - digest: 消息汇总或定向分析 → params: query(用户原始问题，通用汇总时留空), days(时间范围天数，AI根据问题推断，默认7)
@@ -176,7 +176,7 @@ def _chat_prompt():
 - 约会议/设提醒时间用 ISO8601+08:00
 
 你能执行的操作（通过 action 触发）：
-- meeting: 约会议 → params: summary, start(ISO8601+08:00), duration(如1h), attendees(open_id列表)
+- meeting: 约会议 → params: summary, start(ISO8601+08:00), duration(如1h), people(参会人名字列表,可选)
 - cancel_meeting: 取消会议 → params: keyword
 - search_user: 查找同事 → params: query
 - digest: 消息汇总或定向分析 → params: query(用户原始问题，通用汇总时留空), days(时间范围天数，默认7)
@@ -415,14 +415,49 @@ _setup_state = {
 }
 
 
+_user_name_cache = {}
+
 def _get_user_name(open_id):
     """通过 lark-cli 获取用户姓名"""
+    if open_id in _user_name_cache:
+        return _user_name_cache[open_id]
+    result = lark_cmd(["api", "GET", f"/open-apis/contact/v3/users/{open_id}",
+                       "--as", "bot", "--params", json.dumps({"user_id_type": "open_id"})])
+    if result and result.get("code") == 0:
+        name = result.get("data", {}).get("user", {}).get("name", "")
+        if name:
+            _user_name_cache[open_id] = name
+            return name
+    # Fallback: try search
     result = lark_cmd(["contact", "+search-user", "--query", open_id])
     if result and result.get("ok"):
         users = result.get("data", {}).get("users", [])
         if users:
-            return users[0].get("name", "")
+            name = users[0].get("name", "")
+            _user_name_cache[open_id] = name
+            return name
     return ""
+
+
+def _resolve_people(names):
+    """Resolve a list of names to open_ids. Returns [(open_id, name), ...]"""
+    resolved = []
+    if isinstance(names, str):
+        names = [names]
+    for name in names:
+        if not name:
+            continue
+        result = lark_cmd(["contact", "+search-user", "--query", name])
+        if result and result.get("ok"):
+            users = result.get("data", {}).get("users", [])
+            if users:
+                uid = users[0].get("open_id", "")
+                uname = users[0].get("name", name)
+                if uid:
+                    _user_name_cache[uid] = uname
+                    resolved.append((uid, uname))
+                    log(f"Resolved '{name}' → {uname} ({uid[:16]})")
+    return resolved
 
 
 def process_setup(event):
@@ -597,6 +632,10 @@ def do_meeting(params, chat_id, sender_id=""):
         end = start
     args = ["calendar", "+create", "--summary", summary, "--start", start, "--end", end]
     attendees = list(params.get("attendees", []))
+    # Resolve people names to open_ids
+    for uid, _ in _resolve_people(params.get("people", [])):
+        if uid not in attendees:
+            attendees.append(uid)
     if sender_id and sender_id not in attendees:
         attendees.append(sender_id)
     if OWNER_OPEN_ID and OWNER_OPEN_ID not in attendees:
@@ -757,21 +796,10 @@ def do_task_create(params, chat_id, sender_id=""):
         members.append({"id": sender_id, "role": "assignee", "type": "user"})
         member_ids.add(sender_id)
     # Resolve people names to open_ids
-    people = params.get("people", [])
-    if isinstance(people, str):
-        people = [people]
-    for name in people:
-        if not name:
-            continue
-        result = lark_cmd(["contact", "+search-user", "--query", name])
-        if result and result.get("ok"):
-            users = result.get("data", {}).get("users", [])
-            if users:
-                uid = users[0].get("open_id", "")
-                if uid and uid not in member_ids:
-                    members.append({"id": uid, "role": "assignee", "type": "user"})
-                    member_ids.add(uid)
-                    log(f"Resolved '{name}' → {users[0].get('name', '')} ({uid[:16]})")
+    for uid, _ in _resolve_people(params.get("people", [])):
+        if uid not in member_ids:
+            members.append({"id": uid, "role": "assignee", "type": "user"})
+            member_ids.add(uid)
 
     args = ["task", "+create", "--as", "bot", "--summary", summary]
     desc = params.get("description", "")
