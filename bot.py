@@ -1225,10 +1225,11 @@ def do_transcribe_start(chat_id):
     audio_file = os.path.join(TMPDIR_MEETING, f"bot_{timestamp}.pcm")
 
     try:
+        audio_err = os.path.join(BOT_DIR, "audio_capture.err")
         proc = subprocess.Popen(
             [AUDIO_CAPTURE_BIN, "--auto"],
             stdout=open(audio_file, "wb"),
-            stderr=subprocess.DEVNULL,
+            stderr=open(audio_err, "w"),
         )
     except Exception as e:
         log(f"audio_capture start failed: {e}")
