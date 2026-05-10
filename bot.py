@@ -1155,11 +1155,12 @@ _transcribe_state = {
 }
 
 ASR_ENGINE_LOCAL = "本地（SenseVoice）"
-ASR_ENGINE_API = "云端 API"
+ASR_ENGINE_DASHSCOPE = "阿里云（Fun-ASR）"
 
 def _asr_engine_label():
-    if CONFIG and CONFIG.get("asr_engine") == "api":
-        return ASR_ENGINE_API
+    engine = CONFIG.get("asr_engine", "") if CONFIG else ""
+    if engine == "dashscope":
+        return ASR_ENGINE_DASHSCOPE
     return ASR_ENGINE_LOCAL
 
 # ASR onboarding state (first-time engine selection)
@@ -1290,8 +1291,8 @@ def do_transcribe_stop(chat_id):
     duration_str = f"{int(duration_sec // 60)} 分钟"
     _update_transcribe_card(card_msg_id, "transcribing", duration=duration_str)
 
-    # ASR engine selection — re-prompt until API key is configured
-    need_onboard = not CONFIG or not CONFIG.get("asr_api_key")
+    # ASR engine selection — re-prompt until dashscope key is configured
+    need_onboard = not CONFIG or not CONFIG.get("dashscope_api_key")
 
     if need_onboard:
         _asr_onboard_state["active"] = True
@@ -1299,8 +1300,8 @@ def do_transcribe_stop(chat_id):
         _asr_onboard_state["pending_args"] = (audio_file, duration_sec, chat_id, card_msg_id)
         reply_in_chat(chat_id,
             "录音已结束！在开始转写之前，请选择转写引擎：\n\n"
-            "1️⃣ 本地模型（SenseVoice）— 免费离线，但精度一般\n"
-            "2️⃣ 云端 API — 精度更高，需要配置 API Key\n\n"
+            "1️⃣ 本地模型（SenseVoice）— 免费离线，精度一般\n"
+            "2️⃣ 阿里云（Fun-ASR）— 精度最高，需要百炼 API Key\n\n"
             "请回复 1 或 2：")
         log("ASR onboarding: config incomplete, waiting for engine choice")
         return True
@@ -1331,46 +1332,23 @@ def process_asr_onboard(event):
             reply_in_chat(chat_id, "已选择本地模型（SenseVoice），开始转写...")
             _resume_transcribe_pipeline()
         elif text in ("2", "２"):
-            _asr_onboard_state["step"] = "wait_api_key"
+            _asr_onboard_state["step"] = "wait_dashscope_key"
             reply_in_chat(chat_id,
-                "请发送你的语音转写 API Key：\n"
-                "（支持 OpenAI Whisper 兼容接口，如 Groq、DeepInfra 等）")
+                "请发送你的阿里云百炼 API Key：\n"
+                "（在 bailian.console.aliyun.com 华北2(北京) 区域创建）")
         else:
-            reply_in_chat(chat_id, "请回复 1（本地模型）或 2（云端 API）：")
+            reply_in_chat(chat_id, "请回复 1（本地）或 2（阿里云）：")
 
-    elif step == "wait_api_key":
-        if not text or len(text) < 10:
-            reply_in_chat(chat_id, "这个不像是有效的 API Key，再检查一下？")
+    elif step == "wait_dashscope_key":
+        if not text or len(text) < 10 or not text.startswith("sk-"):
+            reply_in_chat(chat_id, "百炼 API Key 以 sk- 开头，再检查一下？")
             return
-        _asr_onboard_state["api_key"] = text
-        _asr_onboard_state["step"] = "wait_api_url"
-        reply_in_chat(chat_id,
-            "API Base URL 是什么？\n\n"
-            "1️⃣ OpenAI（https://api.openai.com/v1）\n"
-            "2️⃣ Groq（https://api.groq.com/openai/v1）\n"
-            "3️⃣ 自定义（直接发送 URL）\n\n"
-            "请回复 1、2 或完整 URL：")
-
-    elif step == "wait_api_url":
-        url_map = {
-            "1": "https://api.openai.com/v1",
-            "１": "https://api.openai.com/v1",
-            "2": "https://api.groq.com/openai/v1",
-            "２": "https://api.groq.com/openai/v1",
-        }
-        base_url = url_map.get(text, text if text.startswith("http") else None)
-        if not base_url:
-            reply_in_chat(chat_id, "请回复 1、2 或完整的 URL（以 http 开头）：")
-            return
-
-        CONFIG["asr_engine"] = "api"
-        CONFIG["asr_api_key"] = _asr_onboard_state.get("api_key", "")
-        CONFIG["asr_api_url"] = base_url
-        CONFIG["asr_model"] = "whisper-large-v3" if "groq" in base_url else "whisper-1"
+        CONFIG["asr_engine"] = "dashscope"
+        CONFIG["dashscope_api_key"] = text
         save_config(CONFIG)
         _asr_onboard_state["active"] = False
         _asr_onboard_state["step"] = None
-        reply_in_chat(chat_id, f"已配置云端 API，开始转写...")
+        reply_in_chat(chat_id, "已配置阿里云 Fun-ASR，开始转写...")
         _resume_transcribe_pipeline()
 
 
@@ -1385,12 +1363,12 @@ def _resume_transcribe_pipeline():
     log("Transcribe pipeline resumed after ASR onboarding")
 
 
-def _transcribe_with_api(audio_file):
-    """Transcribe using cloud Whisper-compatible API."""
+def _transcribe_with_dashscope(audio_file):
+    """Transcribe using Alibaba Cloud DashScope Fun-ASR (WebSocket streaming)."""
     import wave
-    import struct
+    from dashscope.audio.asr import Recognition, RecognitionCallback
 
-    # Convert PCM to WAV in memory
+    # Convert PCM to WAV
     wav_file = audio_file.replace(".pcm", ".wav")
     with open(audio_file, "rb") as pcm:
         pcm_data = pcm.read()
@@ -1400,41 +1378,75 @@ def _transcribe_with_api(audio_file):
         wav.setframerate(16000)
         wav.writeframes(pcm_data)
 
-    api_key = CONFIG.get("asr_api_key", "")
-    base_url = CONFIG.get("asr_api_url", "https://api.openai.com/v1")
-    model = CONFIG.get("asr_model", "whisper-1")
+    import dashscope
+    dashscope.api_key = CONFIG.get("dashscope_api_key", "")
 
-    import requests
+    results = []
+    done_event = threading.Event()
+    error_msg = [None]
+
+    class ASRCallback(RecognitionCallback):
+        def on_event(self, result):
+            sentence = result.get_sentence()
+            if sentence and sentence.get("text") and "end_time" in sentence:
+                results.append(sentence["text"])
+        def on_complete(self):
+            done_event.set()
+        def on_error(self, result):
+            error_msg[0] = str(result.message if hasattr(result, 'message') else result)
+            done_event.set()
+
+    recognition = Recognition(
+        model="paraformer-realtime-v2",
+        format="wav",
+        sample_rate=16000,
+        callback=ASRCallback(),
+        language_hints=["zh"],
+    )
+    recognition.start()
+
     with open(wav_file, "rb") as f:
-        resp = requests.post(
-            f"{base_url}/audio/transcriptions",
-            headers={"Authorization": f"Bearer {api_key}"},
-            files={"file": (os.path.basename(wav_file), f, "audio/wav")},
-            data={"model": model, "language": "zh"},
-            timeout=600,
-        )
+        f.read(44)  # skip WAV header
+        while True:
+            chunk = f.read(3200)  # 100ms of 16kHz 16-bit mono
+            if not chunk:
+                break
+            try:
+                recognition.send_audio_frame(chunk)
+            except Exception:
+                break
+            time.sleep(0.05)
+
+    try:
+        recognition.stop()
+    except Exception:
+        pass
+
+    done_event.wait(timeout=30)
+
     try:
         os.remove(wav_file)
     except OSError:
         pass
 
-    if resp.status_code != 200:
-        raise RuntimeError(f"ASR API error {resp.status_code}: {resp.text[:200]}")
-    return resp.json().get("text", "")
+    if error_msg[0]:
+        raise RuntimeError(f"阿里云 ASR 错误：{error_msg[0]}")
+
+    return "".join(results)
 
 
 def _transcribe_pipeline(audio_file, duration_sec, chat_id, card_msg_id):
     duration_str = f"{int(duration_sec // 60)} 分钟"
     try:
-        use_api = CONFIG and CONFIG.get("asr_engine") == "api"
+        use_dashscope = CONFIG and CONFIG.get("asr_engine") == "dashscope"
 
-        if use_api:
-            log(f"Running cloud ASR on {audio_file}...")
+        if use_dashscope:
+            log(f"Running DashScope ASR on {audio_file}...")
             try:
-                transcript = _transcribe_with_api(audio_file)
+                transcript = _transcribe_with_dashscope(audio_file)
             except Exception as e:
-                log(f"Cloud ASR failed: {e}")
-                _update_transcribe_card(card_msg_id, "error", error=f"云端转写失败：{e}")
+                log(f"DashScope ASR failed: {e}")
+                _update_transcribe_card(card_msg_id, "error", error=f"阿里云转写失败：{e}")
                 return
             if not transcript or not transcript.strip():
                 _update_transcribe_card(card_msg_id, "error", error="转写结果为空，可能会议中没有语音")
