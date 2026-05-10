@@ -1404,21 +1404,20 @@ def _transcribe_with_dashscope(audio_file):
     with open(wav_file, "rb") as f:
         f.read(44)  # skip WAV header
         while True:
-            chunk = f.read(3200)  # 100ms of 16kHz 16-bit mono
+            chunk = f.read(64000)  # ~2s per chunk, no sleep needed
             if not chunk:
                 break
             try:
                 recognition.send_audio_frame(chunk)
             except Exception:
                 break
-            time.sleep(0.05)
 
     try:
         recognition.stop()
     except Exception:
         pass
 
-    done_event.wait(timeout=30)
+    done_event.wait(timeout=600)  # 10 min timeout for long meetings
 
     try:
         os.remove(wav_file)
