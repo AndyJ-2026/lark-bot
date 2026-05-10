@@ -1290,12 +1290,8 @@ def do_transcribe_stop(chat_id):
     duration_str = f"{int(duration_sec // 60)} 分钟"
     _update_transcribe_card(card_msg_id, "transcribing", duration=duration_str)
 
-    # ASR engine selection — check config completeness every time
-    need_onboard = False
-    if not CONFIG or not CONFIG.get("asr_engine"):
-        need_onboard = True
-    elif CONFIG.get("asr_engine") == "api" and not CONFIG.get("asr_api_key"):
-        need_onboard = True
+    # ASR engine selection — re-prompt until API key is configured
+    need_onboard = not CONFIG or not CONFIG.get("asr_api_key")
 
     if need_onboard:
         _asr_onboard_state["active"] = True
