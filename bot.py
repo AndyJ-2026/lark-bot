@@ -1174,10 +1174,10 @@ _asr_onboard_state = {
 def _build_transcribe_card(status, **kwargs):
     if status == "recording":
         start_time = kwargs.get("start_time", "")
-        content = f"🎙️ **正在录音中...**\n开始时间：{start_time}\n引擎：{_asr_engine_label()}\n\n💡 说「结束转写」即可停止并生成纪要"
+        content = f"🎙️ **正在录音中...**\n开始时间：{start_time}\n\n💡 说「结束转写」即可停止并生成纪要"
     elif status == "transcribing":
         duration = kwargs.get("duration", "")
-        content = f"⏳ **转写中...**\n录音时长：{duration}\n引擎：{_asr_engine_label()}"
+        content = f"⏳ **转写中...**\n录音时长：{duration}"
     elif status == "done":
         duration = kwargs.get("duration", "")
         summary = kwargs.get("summary", "会议纪要已生成")
