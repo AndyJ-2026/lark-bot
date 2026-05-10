@@ -1290,8 +1290,14 @@ def do_transcribe_stop(chat_id):
     duration_str = f"{int(duration_sec // 60)} 分钟"
     _update_transcribe_card(card_msg_id, "transcribing", duration=duration_str)
 
-    # First-time ASR engine selection onboarding
-    if CONFIG and not CONFIG.get("asr_engine"):
+    # ASR engine selection — check config completeness every time
+    need_onboard = False
+    if not CONFIG or not CONFIG.get("asr_engine"):
+        need_onboard = True
+    elif CONFIG.get("asr_engine") == "api" and not CONFIG.get("asr_api_key"):
+        need_onboard = True
+
+    if need_onboard:
         _asr_onboard_state["active"] = True
         _asr_onboard_state["step"] = "choose_engine"
         _asr_onboard_state["pending_args"] = (audio_file, duration_sec, chat_id, card_msg_id)
@@ -1300,7 +1306,7 @@ def do_transcribe_stop(chat_id):
             "1️⃣ 本地模型（SenseVoice）— 免费离线，但精度一般\n"
             "2️⃣ 云端 API — 精度更高，需要配置 API Key\n\n"
             "请回复 1 或 2：")
-        log("ASR onboarding: waiting for engine choice")
+        log("ASR onboarding: config incomplete, waiting for engine choice")
         return True
 
     t = threading.Thread(
