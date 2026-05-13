@@ -22,10 +22,10 @@
     <key>ThrottleInterval</key>
     <integer>10</integer>
     <key>StandardOutPath</key>
-    <string>/Users/jaker/lark-bot/bot.log</string>
+    <string>__BOT_DIR__/bot.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/jaker/lark-bot/bot.err</string>
+    <string>__BOT_DIR__/bot.err</string>
     <key>WorkingDirectory</key>
-    <string>/Users/jaker/lark-bot</string>
+    <string>__BOT_DIR__</string>
 </dict>
 </plist>

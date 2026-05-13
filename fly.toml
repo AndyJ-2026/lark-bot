@@ -6,6 +6,8 @@ primary_region = 'hkg'
 
 [env]
   EVENT_DIR = '/app/events'
+  # LARK_APP_ID 和 LARK_APP_SECRET 通过 fly secrets set 注入，不要写在这里
+  # fly secrets set LARK_APP_ID=cli_xxx LARK_APP_SECRET=xxx MINIMAX_API_KEY=xxx
 
 [[vm]]
   size = 'shared-cpu-1x'

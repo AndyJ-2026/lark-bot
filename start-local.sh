@@ -45,8 +45,8 @@ case "${1:-restart}" in
     # 3. 清理旧事件
     rm -f "$SCRIPT_DIR/events/"*.json 2>/dev/null
 
-    # 4. 安装最新 plist（从仓库复制，确保同步）
-    cp "$PLIST_SRC" "$PLIST_DST"
+    # 4. 安装最新 plist（替换路径占位符后复制）
+    sed "s|__BOT_DIR__|$SCRIPT_DIR|g" "$PLIST_SRC" > "$PLIST_DST"
 
     # 5. 加载 LaunchAgent（会自动启动 bot.py）
     launchctl load "$PLIST_DST"
