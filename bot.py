@@ -154,21 +154,33 @@ def _reply_prompt():
   - "帮我转写"、"开始录音" → transcribe_start
 - transcribe_stop: 停止转写/录音并生成纪要 → params: {{}}
   - "结束转写"、"停止录音"、"结束" → transcribe_stop
+- sanbanfu: 三板斧决策分析 → params: topic(决策命题), background(背景介绍), options(选项列表,如["方案A","方案B","方案C"]), people(参与投票的人名列表,可选), target_doc(目标飞书文档URL,可选)
+  - "做三板斧"、"发起三板斧"、"写三板斧" → sanbanfu
+  - ⚠️ 三板斧是例外，不能直接执行！必须先检查再触发：
+    1. 用户提供了命题+选项+背景 → 先在reply中质疑（选项有遗漏吗？背景缺数据吗？），然后action设sanbanfu
+    2. 用户只说"做三板斧"但缺关键信息 → reply中追问缺什么，action设none，等用户补充
+    3. 需要质疑的点：选项是否遗漏"不做/暂缓"？背景有没有硬数据（竞品/成本/时间）？选项之间是否互斥？
+    4. reply控制在3行以内，质疑要具体不要泛泛
+    5. 即使信息不全，也要设action为sanbanfu并把已有信息放params（系统会暂存，下次合并）
+    6. 不要自己追问缺什么，系统会自动判断并追问
+- sanbanfu_confirm: 确认生成三板斧文档 → params: {{}}
+  - 用户说"确认生成"、"没问题生成吧"、"OK发布" → sanbanfu_confirm
 - none: 不需要操作
 
 原则：
 - 能办的直接办，不推给 {OWNER_NAME}，不要问确认，直接执行
+- 三板斧除外：三板斧必须先质疑再执行（见上方说明）
 - 约会议：推断主题，时间转 ISO8601，未指定时长默认 1h，参会人放 people
 - 建任务：直接建，不要问"需要补充吗"，建完说一句就行
 - "晚上10点"→ 当天22:00:00+08:00
 - 不用 markdown，纯文本
 - 失败要说明原因
-- 绝对不要在执行 action 之前问用户确认，信息不全就用合理默认值
+- 除三板斧外，绝对不要在执行 action 之前问用户确认，信息不全就用合理默认值
 
 当前时间：__NOW__
 
 JSON 输出（只输出 JSON）：
-{{"reply": "纯文本回复", "action": "meeting/cancel_meeting/search_user/digest/daily_report/task_create/task_list/task_complete/check_calendar/read_doc/remind/transcribe_start/transcribe_stop/none", "params": {{}}}}"""
+{{"reply": "纯文本回复（三板斧时控制在3行以内）", "action": "meeting/cancel_meeting/search_user/digest/daily_report/task_create/task_list/task_complete/check_calendar/read_doc/remind/transcribe_start/transcribe_stop/sanbanfu/sanbanfu_confirm/none", "params": {{}}}}"""
 
 
 def _chat_prompt():
@@ -201,12 +213,19 @@ def _chat_prompt():
   - "帮我转写"、"开始录音" → transcribe_start
 - transcribe_stop: 停止转写/录音并生成纪要 → params: {{}}
   - "结束转写"、"停止录音"、"结束" → transcribe_stop
+- sanbanfu: 三板斧决策分析 → params: topic(决策命题), background(背景介绍), options(选项列表,如["方案A","方案B","方案C"]), people(参与投票的人名列表,可选), target_doc(目标飞书文档URL,可选)
+  - "做三板斧"、"发起三板斧"、"写三板斧" → sanbanfu
+  - ⚠️ 三板斧是例外，不能直接执行！必须先检查再触发：
+    1. 用户提供了命题+选项+背景 → 先在reply中质疑（选项有遗漏吗？背景缺数据吗？），然后action设sanbanfu
+    2. 用户只说"做三板斧"但缺关键信息 → reply中追问缺什么，action设none，等用户补充
+    3. 需要质疑的点：选项是否遗漏"不做/暂缓"？背景有没有硬数据（竞品/成本/时间）？选项之间是否互斥？
+    4. reply控制在3行以内，质疑要具体不要泛泛
 - none: 不需要操作
 
 当前时间：__NOW__
 
 JSON 输出：
-{{"reply": "纯文本回复", "action": "meeting/cancel_meeting/search_user/digest/daily_report/task_create/task_list/task_complete/check_calendar/read_doc/remind/transcribe_start/transcribe_stop/none", "params": {{}}}}"""
+{{"reply": "纯文本回复（三板斧时控制在3行以内）", "action": "meeting/cancel_meeting/search_user/digest/daily_report/task_create/task_list/task_complete/check_calendar/read_doc/remind/transcribe_start/transcribe_stop/sanbanfu/none", "params": {{}}}}"""
 
 
 def _report_prompt():
@@ -270,6 +289,39 @@ __MESSAGES__
 - 纯文本输出，禁止使用任何 markdown 语法（不要用 #、>、**、|---|、```等）
 - 用换行和短横线分隔内容，用数字编号代替标题
 - 如果消息中没有相关内容，如实说明"""
+
+
+SANBANFU_PROMPT = """你是三板斧决策分析专家。根据提供的命题、背景和选项，为每个方案分析利弊。
+
+命题：__TOPIC__
+背景：__BACKGROUND__
+选项：
+__OPTIONS__
+
+要求：
+1. 为每个方案生成 2-3 条利和 2-3 条弊，必须输出，不能留空
+2. 每条格式：关键词：一句话解释
+3. 即使选项描述简短（如只有名称），也要结合命题和背景推断每个方案的利弊
+4. 使用业务语言，不堆技术数据
+5. 每条利弊必须回答"这条会不会改变投票"，不会就删
+6. 删掉影响力弱的条目（选项固有特征不是弊）
+7. 不确定的结论加"可能"
+8. 重要弊项末尾附带解法（解法：一句话方案）
+9. 不同方案的利弊之间要有区分度
+10. 选项名称不能自解释时，先补充一句方案描述
+
+严格按以下 JSON 格式输出（只输出 JSON，不要其他内容）：
+{
+  "options": [
+    {
+      "name": "选项名称",
+      "description": "方案描述（选项名不够清晰时补充，否则留空）",
+      "pros": ["关键词：解释", "关键词：解释"],
+      "cons": ["关键词：解释", "关键词：解释；解法：缓解方案"]
+    }
+  ],
+  "challenge": "对选项或背景的质疑建议（如有遗漏方案、数据缺口等，没有就留空）"
+}"""
 
 
 def _owner_pattern():
@@ -953,6 +1005,241 @@ def do_read_doc(params, chat_id):
     return False
 
 
+# Sanbanfu state storage
+_sanbanfu_drafts = {}    # chat_id → {params, analysis, analyzed_options} (confirmed preview)
+_sanbanfu_pending = {}   # chat_id → {topic, background, options, people, ...} (accumulating params)
+
+
+def _merge_sanbanfu_params(old, new):
+    """Merge new params into old, keeping non-empty values."""
+    merged = dict(old)
+    for k, v in new.items():
+        if v and v != []:  # Only overwrite with non-empty values
+            merged[k] = v
+    return merged
+
+
+def do_sanbanfu(params, chat_id, sender_id=""):
+    """Phase 1: Accumulate params, analyze when ready, show preview."""
+    # If there's already a preview waiting for confirmation, treat new sanbanfu
+    # as a modification request — re-analyze with merged params
+    if chat_id in _sanbanfu_drafts:
+        old_draft = _sanbanfu_drafts.pop(chat_id)
+        old_params = old_draft["params"]
+        params = _merge_sanbanfu_params(old_params, params)
+        log(f"Sanbanfu re-analyze (had existing preview): {params.get('topic', '')}")
+
+    # Merge with any pending params from previous rounds
+    if chat_id in _sanbanfu_pending:
+        params = _merge_sanbanfu_params(_sanbanfu_pending[chat_id], params)
+
+    topic = params.get("topic", "")
+    background = params.get("background", "")
+    options = params.get("options", [])
+
+    # Check required fields — store and ask if incomplete
+    missing = []
+    if not topic:
+        missing.append("命题（你们要决定什么）")
+    if not options or len(options) < 2:
+        missing.append("选项（至少 2 个备选方案）")
+    if missing:
+        # Store what we have so far
+        _sanbanfu_pending[chat_id] = params
+        already = []
+        if topic:
+            already.append(f"命题：{topic}")
+        if background:
+            already.append(f"背景：{background}")
+        if options:
+            already.append(f"选项：{'、'.join(options)}")
+        msg = f"三板斧还缺：{' / '.join(missing)}"
+        if already:
+            msg += f"\n\n已收到：\n" + "\n".join(already)
+        reply_in_chat(chat_id, msg)
+        return True
+
+    # All required info collected, clear pending
+    _sanbanfu_pending.pop(chat_id, None)
+
+    reply_in_chat(chat_id, f"收到！正在为「{topic}」分析利弊...")
+
+    # Build options text
+    opt_lines = "\n".join([f"{i+1}. {o}" for i, o in enumerate(options)])
+
+    # Call AI to analyze pros/cons
+    prompt = SANBANFU_PROMPT.replace("__TOPIC__", topic) \
+                            .replace("__BACKGROUND__", background or "（未提供）") \
+                            .replace("__OPTIONS__", opt_lines)
+    raw = call_ai(prompt, "请分析")
+    if not raw:
+        reply_in_chat(chat_id, "利弊分析失败，请稍后再试")
+        return False
+
+    # Parse AI result
+    try:
+        analysis = json.loads(raw)
+    except json.JSONDecodeError:
+        start = raw.find("{")
+        end = raw.rfind("}") + 1
+        if start >= 0 and end > start:
+            try:
+                analysis = json.loads(raw[start:end])
+            except json.JSONDecodeError:
+                reply_in_chat(chat_id, "利弊分析结果解析失败，请重试")
+                return False
+        else:
+            reply_in_chat(chat_id, "利弊分析结果解析失败，请重试")
+            return False
+
+    analyzed_options = analysis.get("options", [])
+    challenge = analysis.get("challenge", "")
+
+    # Fallback: if AI returned empty options or no pros/cons, use original options
+    if not analyzed_options or all(not o.get("pros") and not o.get("cons") for o in analyzed_options):
+        log(f"Sanbanfu AI analysis empty, using fallback with original options")
+        analyzed_options = [{"name": o, "description": "", "pros": ["（待补充）"], "cons": ["（待补充）"]} for o in options]
+        if not challenge:
+            challenge = "AI 未能生成有效的利弊分析，建议补充各方案的具体描述后重试"
+
+    # Build readable preview for chat
+    preview_lines = []
+    for i, opt in enumerate(analyzed_options):
+        name = opt.get("name", options[i] if i < len(options) else f"方案{i+1}")
+        pros = opt.get("pros", [])
+        cons = opt.get("cons", [])
+        preview_lines.append(f"【方案{i+1}】{name}")
+        for p in pros:
+            preview_lines.append(f"  利：{p}")
+        for c in cons:
+            preview_lines.append(f"  弊：{c}")
+    if challenge:
+        preview_lines.append(f"\nAI建议：{challenge}")
+    preview_lines.append("\n---\n以上利弊分析OK的话，回复「确认生成」发布到飞书文档。\n需要修改的话直接告诉我改哪里。")
+
+    reply_in_chat(chat_id, "\n".join(preview_lines))
+
+    # Store draft for confirmation
+    _sanbanfu_drafts[chat_id] = {
+        "params": params,
+        "analysis": analysis,
+        "analyzed_options": analyzed_options,
+    }
+    log(f"Sanbanfu preview sent, waiting confirmation: {topic}")
+    return True
+
+
+def do_sanbanfu_confirm(params, chat_id, sender_id=""):
+    """Phase 2: User confirmed, generate Lark document."""
+    draft = _sanbanfu_drafts.pop(chat_id, None)
+    if not draft:
+        reply_in_chat(chat_id, "没有待确认的三板斧，请先发起一个新的三板斧。")
+        return True
+
+    orig_params = draft["params"]
+    analyzed_options = draft["analyzed_options"]
+    challenge = draft["analysis"].get("challenge", "")
+
+    topic = orig_params.get("topic", "")
+    background = orig_params.get("background", "")
+    people = orig_params.get("people", [])
+    people_str = "、".join(people) if people else ""
+    expected = orig_params.get("expected", "")
+    options = orig_params.get("options", [])
+
+    reply_in_chat(chat_id, "好的，正在生成飞书文档...")
+
+    # Single unified table: header info rows (3) + column header (1) + options + 其他方案
+    n_opts = len(analyzed_options)
+    n_rows = 3 + 1 + n_opts + 1
+    doc_lines = []
+    doc_lines.append(f'<lark-table rows="{n_rows}" cols="5" column-widths="80,220,250,250,100">')
+
+    # Row 1: 命题 (label in col A, content in col B, rest empty)
+    doc_lines.append("  <lark-tr>")
+    doc_lines.append("    <lark-td>\n      **命题**\n    </lark-td>")
+    doc_lines.append(f"    <lark-td>\n      {topic}\n    </lark-td>")
+    for _ in range(3):
+        doc_lines.append("    <lark-td>\n    </lark-td>")
+    doc_lines.append("  </lark-tr>")
+
+    # Row 2: 背景
+    doc_lines.append("  <lark-tr>")
+    doc_lines.append("    <lark-td>\n      **背景**\n    </lark-td>")
+    doc_lines.append(f"    <lark-td>\n      {background or ''}\n    </lark-td>")
+    for _ in range(3):
+        doc_lines.append("    <lark-td>\n    </lark-td>")
+    doc_lines.append("  </lark-tr>")
+
+    # Row 3: 期望结果
+    doc_lines.append("  <lark-tr>")
+    doc_lines.append("    <lark-td>\n      **期望结果**\n    </lark-td>")
+    doc_lines.append(f"    <lark-td>\n      {expected or ''}\n    </lark-td>")
+    for _ in range(3):
+        doc_lines.append("    <lark-td>\n    </lark-td>")
+    doc_lines.append("  </lark-tr>")
+
+    # Row 4: Column headers
+    doc_lines.append("  <lark-tr>")
+    for h in ["序号", "建议/选项", "利", "弊", "投票人"]:
+        doc_lines.append(f"    <lark-td>\n      **{h}**\n    </lark-td>")
+    doc_lines.append("  </lark-tr>")
+
+    # Option rows
+    for i, opt in enumerate(analyzed_options):
+        name = opt.get("name", f"方案{i+1}")
+        desc = opt.get("description", "")
+        pros = opt.get("pros", [])
+        cons = opt.get("cons", [])
+        opt_text = f"**{name}**\n{desc}" if desc else name
+        pros_bullets = "\n".join([f"- **{p.split('：', 1)[0]}：**{p.split('：', 1)[1]}" if "：" in p else f"- {p}" for p in pros]) if pros else ""
+        cons_bullets = "\n".join([f"- **{c.split('：', 1)[0]}：**{c.split('：', 1)[1]}" if "：" in c else f"- {c}" for c in cons]) if cons else ""
+        doc_lines.append("  <lark-tr>")
+        doc_lines.append(f"    <lark-td>\n      {i+1}\n    </lark-td>")
+        doc_lines.append(f"    <lark-td>\n      {opt_text}\n    </lark-td>")
+        doc_lines.append(f"    <lark-td>\n      {pros_bullets}\n    </lark-td>")
+        doc_lines.append(f"    <lark-td>\n      {cons_bullets}\n    </lark-td>")
+        doc_lines.append("    <lark-td>\n    </lark-td>")
+        doc_lines.append("  </lark-tr>")
+
+    # "其他方案" row
+    doc_lines.append("  <lark-tr>")
+    doc_lines.append(f"    <lark-td>\n      {n_opts+1}\n    </lark-td>")
+    doc_lines.append("    <lark-td>\n      其他方案\n    </lark-td>")
+    for _ in range(3):
+        doc_lines.append("    <lark-td>\n    </lark-td>")
+    doc_lines.append("  </lark-tr>")
+    doc_lines.append("</lark-table>")
+
+    if challenge:
+        doc_lines.append(f'\n<callout emoji="bulb" background-color="light-yellow" border-color="light-yellow">\nAI 建议：{challenge}\n</callout>')
+
+    doc_markdown = "\n".join(doc_lines)
+
+    # Create or update Lark document
+    doc_url = orig_params.get("target_doc", "")
+    if doc_url:
+        doc_token = doc_url.rstrip("/").split("/")[-1]
+        update_result = lark_cmd(["docs", "+update", "--doc", doc_token,
+                                  "--mode", "append", "--markdown", doc_markdown])
+        if not update_result or not update_result.get("ok"):
+            reply_in_chat(chat_id, "文档更新失败，请检查链接权限")
+            return False
+    else:
+        doc_result = lark_cmd(["docs", "+create",
+                               "--title", f"三板斧：{topic}",
+                               "--markdown", doc_markdown])
+        if not doc_result or not doc_result.get("ok"):
+            reply_in_chat(chat_id, "飞书文档创建失败")
+            return False
+        doc_token = doc_result.get("data", {}).get("doc_id", "")
+        doc_url = doc_result.get("data", {}).get("doc_url", "")
+
+    reply_in_chat(chat_id, f"三板斧已发布到飞书文档 ✅\n{doc_url}\n\n投票人列已留空，参与者可直接在文档中填写。")
+    log(f"Sanbanfu published: {topic}, doc: {doc_url}")
+    return True
+
+
 def _pull_chat_messages(chat_id, since):
     all_messages = []
     page_token = ""
@@ -1561,6 +1848,10 @@ def execute_action(action, params, chat_id, sender_id="", chat_type="group"):
         return do_transcribe_start(chat_id)
     elif action == "transcribe_stop":
         return do_transcribe_stop(chat_id)
+    elif action == "sanbanfu":
+        return do_sanbanfu(params, chat_id, sender_id)
+    elif action == "sanbanfu_confirm":
+        return do_sanbanfu_confirm(params, chat_id, sender_id)
     return False
 
 
