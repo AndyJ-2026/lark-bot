@@ -1,0 +1,18 @@
+{
+  "activities": [
+    {
+      "label": "活动名签（卡片显示用，如：SPACEX (PRE)）",
+      "page_name": "DataWind 筛选用全名，如：明星活动_SPACEX(PRE)_0612_20260612",
+      "uv_target": 12000,
+      "step": 1,
+      "status": "active 或 ended（已收尾仍出现在卡片里，带「已收尾」标签）"
+    }
+  ],
+  "eftd_overview_step": 4,
+  "daily_new_step": 5,
+  "bookmark_id": "bm-1782218891028",
+  "webhook_url": "TODO: 现货活动组飞书 incoming webhook URL",
+  "llm_model": "MiniMax-M2.5",
+  "llm_base_url": "https://api.minimax.io/v1",
+  "llm_api_key_env": "MINIMAX_API_KEY"
+}
