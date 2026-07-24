@@ -20,6 +20,30 @@ from datetime import datetime, timedelta
 
 BOT_DIR = os.path.dirname(os.path.abspath(__file__))
 
+# 活动排期自动填表模块（群消息「项目名称/活动周期」模板 → 写多维表格）
+sys.path.insert(0, os.path.join(BOT_DIR, "活动排期填表"))
+try:
+    from handler import (is_activity_message, handle as _activity_handle,
+                         should_handle as _activity_should, TARGET_GROUP_CHAT_ID as _ACTIVITY_GROUP)
+except Exception as _e:
+    is_activity_message = lambda _t: False  # noqa: E731
+    _activity_should = lambda _t, _c: False  # noqa: E731
+    _activity_handle = None
+    _ACTIVITY_GROUP = ""
+    print(f"[warn] 活动填表模块未加载: {_e}")
+
+# 明星活动排期自动填表模块（同步群「大/小明星活动」帖 → 写明星排期表 → 发【现货】活动组）
+sys.path.insert(0, os.path.join(BOT_DIR, "明星活动排期"))
+try:
+    from star_handler import (is_star_message, star_handle as _star_handle,
+                              star_should as _star_should, STAR_GROUP_CHAT_ID as _STAR_GROUP)
+except Exception as _e:
+    is_star_message = lambda _t: False  # noqa: E731
+    _star_should = lambda _t, _c: False  # noqa: E731
+    _star_handle = None
+    _STAR_GROUP = ""
+    print(f"[warn] 明星填表模块未加载: {_e}")
+
 # Load .env file (no external dependency)
 _env_file = os.path.join(BOT_DIR, ".env")
 if os.path.isfile(_env_file):
@@ -1908,6 +1932,31 @@ def process_event(event):
     if sender_id == _BOT_OPEN_ID:
         return
 
+    # --- 活动排期自动填表：识别「项目名称/活动周期」模板 → 写表 → 发群卡片 ---
+    # 放在 msg_type 过滤之前：话题帖是 post 富文本，compact 已把文字拍平进 content
+    # 闸门：仅处理来源白名单群 + 符合类型过滤（同步群只 Airdrop+）的活动帖
+    if _activity_handle and is_activity_message(raw_content) and _activity_should(raw_content, chat_id):
+        try:
+            ok, summary, card = _activity_handle(raw_content, chat_id)
+            log(f"活动填表 {'ok' if ok else 'fail'}: {summary}")
+            if ok and card:
+                _send_card(_ACTIVITY_GROUP, card)  # 表先更新，再发【现货】活动组卡片
+        except Exception as e:
+            log(f"活动填表异常(静默): {e}")  # 失败不推群/不刷屏，仅本地日志
+        return
+
+    # --- 明星活动排期自动填表：同步群「大/小明星活动」帖 → 写明星排期表 → 发【现货】活动组 ---
+    # 与 A+ 互斥：A+ 认「项目名称」，明星认「活动名称+明星类型」，不会重复处理
+    if _star_handle and is_star_message(raw_content) and _star_should(raw_content, chat_id):
+        try:
+            ok, summary, card = _star_handle(raw_content, chat_id)
+            log(f"明星填表 {'ok' if ok else 'fail'}: {summary}")
+            if ok and card:
+                _send_card(_STAR_GROUP, card)  # 表先更新，再发【现货】活动组卡片
+        except Exception as e:
+            log(f"明星填表异常(静默): {e}")  # 失败不推群/不刷屏，仅本地日志
+        return
+
     if msg_type and msg_type != "text":
         return
 
@@ -2112,6 +2161,11 @@ _ws_restart_count = 0     # consecutive restarts without staying alive
 _WS_COOLDOWN = 60         # min seconds between restarts
 _WS_STABLE_TIME = 30      # process must live this long to count as "stable"
 _ws_notified = False       # whether we already sent a reconnect card this cycle
+# 假活检测：进程没退出、但连接已死（ticket 失效 / DNS 抽风），poll() 看门狗抓不到。
+# _start_lark_ws() 每次以 "w" 截断 lark-ws.err，故健康时该文件不再增长、mtime 停在启动时刻。
+_WS_ERR_FILE = os.path.join(BOT_DIR, "lark-ws.err")
+_WS_ZOMBIE_WINDOW = 180    # 错误日志在这么多秒内仍被写入 = 连接正在持续报错
+_WS_FATAL_MARKERS = ("ticket is invalid", "no such host", "connect failed")
 
 
 def _start_lark_ws():
@@ -2150,6 +2204,26 @@ def _start_lark_ws():
     return _ws_process
 
 
+def _ws_looks_zombie():
+    """进程还活着、但连接已死：读 lark-ws.err，若最近仍在写入且含致命错误标记 → 判假活。
+    要求错误发生在最近一次 (重)启之后，避免命中旧日志（正常也会被 "w" 截断，双保险）。"""
+    try:
+        st = os.stat(_WS_ERR_FILE)
+    except OSError:
+        return False
+    if time.time() - st.st_mtime > _WS_ZOMBIE_WINDOW:   # 日志已静默 → 连接大概率健康
+        return False
+    if st.st_mtime < _ws_last_restart:                  # 错误早于本次重启 → 忽略陈旧内容
+        return False
+    try:
+        with open(_WS_ERR_FILE, "rb") as f:
+            f.seek(max(0, st.st_size - 4096))
+            tail = f.read().decode("utf-8", "ignore")
+    except OSError:
+        return False
+    return any(m in tail for m in _WS_FATAL_MARKERS)
+
+
 def _check_ws_health():
     """Check if lark-cli is alive, restart if dead with cooldown."""
     global _ws_process, _ws_restart_count, _ws_notified
@@ -2177,9 +2251,22 @@ def _check_ws_health():
                 _ws_notified = True
         return True
 
-    # Process is alive — if it's been stable, reset counter
+    # Process is alive but connection may be dead (zombie): poll() can't catch this.
+    # Detect via err log and force a reconnect (fresh ticket). Cooldown-guarded so no thrash.
+    if _ws_looks_zombie() and time.time() - _ws_last_restart >= _WS_COOLDOWN:
+        log("lark-cli alive but connection dead (zombie), forcing reconnect...")
+        _start_lark_ws()  # truncates lark-ws.err, re-auths with fresh ticket
+        if CONFIG and not _ws_notified:
+            time.sleep(5)
+            if _ws_process and _ws_process.poll() is None:
+                _send_ws_alert("消息订阅假死")
+                _ws_notified = True
+        return True
+
+    # Process is alive — if it's been stable, reset counters (and re-arm notification)
     if time.time() - _ws_last_restart > _WS_STABLE_TIME and _ws_restart_count > 0:
         _ws_restart_count = 0
+        _ws_notified = False
     return False
 
 
@@ -2190,6 +2277,16 @@ def _send_online_card(reconnect=False):
         content = f"🔄 **{BOT_NAME} 已恢复连接**\n\n时间：{now}\n网络断开后自动重连成功"
     else:
         content = f"✅ **{BOT_NAME} 已上线**\n\n时间：{now}\n随时可以跟我说话~"
+    card = json.dumps({"elements": [{"tag": "markdown", "content": content}]})
+    if OWNER_OPEN_ID:
+        _send_card_to_user(OWNER_OPEN_ID, card)
+
+
+def _send_ws_alert(reason):
+    """连接假死自愈时私聊提醒 owner，让掉线有感知。"""
+    now = datetime.now().strftime("%H:%M")
+    content = (f"⚠️ **{BOT_NAME} 连接自愈**\n\n时间：{now}\n"
+               f"检测到{reason}（连接假死），已强制重连并刷新凭证。")
     card = json.dumps({"elements": [{"tag": "markdown", "content": content}]})
     if OWNER_OPEN_ID:
         _send_card_to_user(OWNER_OPEN_ID, card)

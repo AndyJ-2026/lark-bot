@@ -14,14 +14,14 @@ PLIST_DST="$HOME/Library/LaunchAgents/com.jaker.lark-bot.plist"
 case "${1:-restart}" in
   stop)
     launchctl unload "$PLIST_DST" 2>/dev/null
-    pkill -9 -f "python.*bot\.py" 2>/dev/null
+    pkill -9 -f "[Pp]ython.*bot\.py" 2>/dev/null
     pkill -9 -f "lark-cli.*subscribe" 2>/dev/null
     rm -f "$SCRIPT_DIR/.bot.lock"
     echo "已停止"
     ;;
 
   status)
-    if pgrep -f "python.*bot\.py" >/dev/null 2>&1; then
+    if pgrep -f "[Pp]ython.*bot\.py" >/dev/null 2>&1; then
       PID=$(cat "$SCRIPT_DIR/.bot.lock" 2>/dev/null || echo "?")
       echo "运行中 (PID: $PID)"
       pgrep -f "lark-cli.*subscribe" >/dev/null 2>&1 && echo "lark-cli: 在线" || echo "lark-cli: 离线"
@@ -37,7 +37,7 @@ case "${1:-restart}" in
     launchctl unload "$PLIST_DST" 2>/dev/null
 
     # 2. 杀掉所有残留
-    pkill -9 -f "python.*bot\.py" 2>/dev/null
+    pkill -9 -f "[Pp]ython.*bot\.py" 2>/dev/null
     pkill -9 -f "lark-cli.*subscribe" 2>/dev/null
     rm -f "$SCRIPT_DIR/.bot.lock"
     sleep 1
@@ -53,7 +53,7 @@ case "${1:-restart}" in
     sleep 3
 
     # 6. 确认
-    if pgrep -f "python.*bot\.py" >/dev/null 2>&1; then
+    if pgrep -f "[Pp]ython.*bot\.py" >/dev/null 2>&1; then
       PID=$(cat "$SCRIPT_DIR/.bot.lock" 2>/dev/null || echo "?")
       echo "bot.py 已启动 (PID: $PID)"
       pgrep -f "lark-cli.*subscribe" >/dev/null 2>&1 && echo "lark-cli: 在线" || echo "lark-cli: 等待连接..."
